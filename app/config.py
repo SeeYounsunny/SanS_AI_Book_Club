@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     taste_bookmarks_limit: int = Field(default=30, alias="TASTE_BOOKMARKS_LIMIT")
     taste_max_clusters: int = Field(default=4, alias="TASTE_MAX_CLUSTERS")
 
+    # LLM summary (optional)
+    openai_summary_model: str = Field(default="gpt-4o-mini", alias="OPENAI_SUMMARY_MODEL")
+    taste_summary_max_quotes: int = Field(default=6, alias="TASTE_SUMMARY_MAX_QUOTES")
+
     # Webhook mode: if webhook_url is set, we will start webhook server.
     webhook_url: Optional[str] = Field(default=None, alias="WEBHOOK_URL")
     port: int = Field(default=8080, alias="PORT")

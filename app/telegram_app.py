@@ -175,6 +175,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
             "- /taste_member: 특정 멤버 취향 스냅샷 보기 (예: /taste_member @username 또는 /taste_member 123456789)",
             "- /club_taste: 북클럽 전체 취향 스냅샷(종합)",
+            "- /taste_summary: (멤버 1:1) 취향 요약 1~3줄 (LLM)",
             "",
             "빠른 시작",
             "1) 봇을 독서모임 그룹에 초대",
@@ -632,6 +633,63 @@ def _taste_snapshot_from_bookmarks(
     return header + "\n\n".join(sections), theme_lines
 
 
+def _select_representative_bookmarks(
+    bookmarks: List[Bookmark],
+    embeddings: List[List[float]],
+    *,
+    max_clusters: int,
+    max_quotes: int,
+) -> List[Bookmark]:
+    if not bookmarks:
+        return []
+    if len(bookmarks) <= max_quotes:
+        return bookmarks
+    clusters = _cluster_embeddings(embeddings, threshold=0.82)[: max(1, max_clusters)]
+    reps: List[Bookmark] = []
+    for inds in clusters:
+        for i in inds[:2]:
+            reps.append(bookmarks[i])
+            if len(reps) >= max_quotes:
+                return reps
+    return reps[:max_quotes]
+
+
+def _build_taste_summary_prompt(quotes: List[Bookmark]) -> str:
+    lines: List[str] = []
+    for b in quotes:
+        page_part = f"(p.{b.page}) " if b.page is not None else ""
+        lines.append(f"- {page_part}{b.text}")
+    return "\n".join(lines)
+
+
+def _get_openai_taste_summary(api_key: str, model: str, prompt: str) -> str:
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "너는 온라인 독서모임을 돕는 도우미야. 사용자의 책갈피 문장들을 보고 독서 취향을 한국어로 요약해.",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "아래는 내가 저장한 책갈피 문장들이야.\n\n"
+                    f"{prompt}\n\n"
+                    "요청:\n"
+                    "- 한국어로 1~3문장만\n"
+                    "- 질문 금지\n"
+                    "- 목록/불릿 금지\n"
+                    "- 단정적인 진단/평가 톤 금지 (부드럽게 '경향' 정도로)\n"
+                ),
+            },
+        ],
+        temperature=0.5,
+    )
+    text = (resp.choices[0].message.content or "").strip()
+    return text
+
+
 async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Member-facing "taste snapshot" based on their bookmarks.
     if not await _require_private_chat(update):
@@ -715,6 +773,95 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await msg.reply_text(snapshot)
+
+
+async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Member-facing 1~3 line summary (LLM) based on representative bookmarks.
+    if not await _require_private_chat(update):
+        return
+    if not await _require_member(update, context):
+        return
+
+    msg = update.effective_message
+    user = update.effective_user
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None or user is None:
+        return
+
+    if settings.embeddings_provider != "openai" or not settings.openai_api_key:
+        await msg.reply_text("이 기능을 사용하려면 운영진이 OPENAI_API_KEY를 설정해야 해요.")
+        return
+
+    limit = max(3, min(100, int(settings.taste_bookmarks_limit)))
+    max_clusters = max(1, min(8, int(settings.taste_max_clusters)))
+    max_quotes = max(3, min(12, int(settings.taste_summary_max_quotes)))
+
+    items = []
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, limit=limit)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, limit=limit)
+        finally:
+            conn.close()
+
+    items = [b for b in items if (b.text or "").strip()]
+    if len(items) < 2:
+        await msg.reply_text("요약을 만들기엔 책갈피가 아직 너무 적어요. 문장을 2개 이상 저장해줘요.")
+        return
+
+    texts = [b.text for b in items]
+    try:
+        embeddings = await asyncio.to_thread(
+            _get_openai_embeddings,
+            settings.openai_api_key,
+            settings.openai_embeddings_model,
+            texts,
+        )
+    except Exception:
+        logger.info("Failed to fetch embeddings for taste_summary", exc_info=True)
+        await msg.reply_text("지금은 요약을 만들기 위한 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    reps = _select_representative_bookmarks(items, embeddings, max_clusters=max_clusters, max_quotes=max_quotes)
+    prompt = _build_taste_summary_prompt(reps)
+    try:
+        summary = await asyncio.to_thread(
+            _get_openai_taste_summary,
+            settings.openai_api_key,
+            settings.openai_summary_model,
+            prompt,
+        )
+    except AuthenticationError:
+        await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
+        return
+    except RateLimitError:
+        await msg.reply_text("요청이 너무 많아서 잠시 제한됐어요. 잠깐 후 다시 시도해줘요.")
+        return
+    except APIConnectionError:
+        await msg.reply_text("네트워크 문제로 요약을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+    except APIError as e:
+        logger.info("OpenAI APIError while generating taste summary", exc_info=True)
+        await msg.reply_text(f"OpenAI 오류로 요약을 만들지 못했어요. ({e.__class__.__name__})")
+        return
+    except Exception as e:
+        logger.info("Failed to generate taste summary", exc_info=True)
+        await msg.reply_text(f"지금은 요약을 만들지 못했어요. ({e.__class__.__name__})")
+        return
+
+    if not summary:
+        await msg.reply_text("요약 결과가 비어있어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    # Ensure 1~3 lines (soft cap)
+    lines = [ln.strip() for ln in summary.splitlines() if ln.strip()]
+    await msg.reply_text("\n".join(lines[:3]))
 
 
 async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -993,6 +1140,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("bookmark_edit", cmd_bookmark_edit))
     app.add_handler(CommandHandler("bookmark_delete", cmd_bookmark_delete))
     app.add_handler(CommandHandler("taste", cmd_taste))
+    app.add_handler(CommandHandler("taste_summary", cmd_taste_summary))
     app.add_handler(CommandHandler("taste_member", cmd_taste_member))
     app.add_handler(CommandHandler("club_taste", cmd_club_taste))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
