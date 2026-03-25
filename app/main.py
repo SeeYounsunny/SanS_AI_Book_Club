@@ -69,6 +69,8 @@ async def _run(app: Application) -> None:
     site = web.TCPSite(runner, host="0.0.0.0", port=settings.port)
     await site.start()
 
+    polling_started = False
+
     async def ensure_webhook() -> None:
         if not settings.webhook_url:
             return
@@ -81,17 +83,19 @@ async def _run(app: Application) -> None:
 
         for attempt in range(1, 21):
             try:
+                # Stop polling before enabling webhook to avoid 409 Conflict.
+                if polling_started:
+                    try:
+                        await app.updater.stop()
+                        logger.info("Polling stopped before setting webhook")
+                    except Exception:
+                        logger.info("Stopping polling failed (ignored)", exc_info=True)
+
                 await app.bot.set_webhook(
                     url=url,
                     secret_token=settings.webhook_secret_token or None,
                 )
                 logger.info("Webhook set to %s", url)
-                # Once webhook is active, stop polling fallback to avoid getUpdates/webhook conflict.
-                try:
-                    await app.updater.stop()
-                    logger.info("Polling stopped after webhook set")
-                except Exception:
-                    logger.info("Stopping polling failed (ignored)", exc_info=True)
                 return
             except RetryAfter as e:
                 # Telegram flood control: respect retry_after to avoid crash loops.
@@ -111,7 +115,6 @@ async def _run(app: Application) -> None:
 
     # Start polling as a temporary fallback so commands like /chatid work even if webhook
     # registration is still failing. Once webhook is set successfully, polling will be stopped.
-    polling_started = False
     if settings.webhook_url:
         try:
             await app.updater.start_polling(allowed_updates=["message", "callback_query"])
