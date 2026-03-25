@@ -25,6 +25,8 @@ from app.db import (
     delete_bookmark_sqlite,
     enforce_bookmarks_limit_postgres,
     enforce_bookmarks_limit_sqlite,
+    find_user_id_by_username_postgres,
+    find_user_id_by_username_sqlite,
     init_db_postgres,
     init_db_sqlite,
     insert_bookmark_postgres,
@@ -34,6 +36,8 @@ from app.db import (
     is_postgres_url,
     list_bookmarks_postgres,
     list_bookmarks_sqlite,
+    list_recent_bookmarks_all_postgres,
+    list_recent_bookmarks_all_sqlite,
     update_bookmark_postgres,
     update_bookmark_sqlite,
 )
@@ -168,7 +172,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 MEMBER_CHAT_ID/ADMIN_CHAT_ID 설정용)",
             "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
-            "- /taste_member: 특정 멤버 취향 스냅샷 보기 (예: /taste_member 123456789)",
+            "- /taste_member: 특정 멤버 취향 스냅샷 보기 (예: /taste_member @username 또는 /taste_member 123456789)",
+            "- /club_taste: 북클럽 전체 취향 스냅샷(종합)",
             "",
             "빠른 시작",
             "1) 봇을 독서모임 그룹에 초대",
@@ -665,11 +670,35 @@ async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if msg is None:
         return
 
-    if not context.args or not context.args[0].isdigit():
-        await msg.reply_text("사용법: /taste_member <telegram_user_id>\n예) /taste_member 123456789")
+    if not context.args:
+        await msg.reply_text("사용법: /taste_member @username\n또는: /taste_member <telegram_user_id>")
         return
+    target_raw = context.args[0].strip()
+    target_user_id: Optional[int] = None
+    target_label = target_raw
 
-    target_user_id = int(context.args[0])
+    if target_raw.isdigit():
+        target_user_id = int(target_raw)
+    elif target_raw.startswith("@"):
+        # Resolve via DB (works if the member has interacted/saved at least once)
+        if is_postgres_url(settings.database_url):
+            conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+            try:
+                target_user_id = find_user_id_by_username_postgres(conn, username=target_raw)
+            finally:
+                conn.close()
+        else:
+            conn = connect_sqlite(settings.db_path)
+            try:
+                target_user_id = find_user_id_by_username_sqlite(conn, username=target_raw)
+            finally:
+                conn.close()
+        if target_user_id is None:
+            await msg.reply_text("해당 @username을 찾지 못했어요. (그 멤버가 책갈피/진도체크를 한 번이라도 해야 조회 가능해요.)")
+            return
+    else:
+        await msg.reply_text("사용법: /taste_member @username\n또는: /taste_member <telegram_user_id>")
+        return
 
     limit = max(10, min(100, int(settings.taste_bookmarks_limit)))
     max_clusters = max(2, min(8, int(settings.taste_max_clusters)))
@@ -710,7 +739,58 @@ async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     snapshot, _themes = _taste_snapshot_from_bookmarks(bookmarks=items, embeddings=embeddings, max_clusters=max_clusters)
-    await msg.reply_text("운영진용 멤버 취향 스냅샷\n\n" + snapshot)
+    await msg.reply_text(f"운영진용 멤버 취향 스냅샷 ({target_label})\n\n" + snapshot)
+
+
+async def cmd_club_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Admin-facing aggregate taste snapshot for the whole club.
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+
+    if settings.embeddings_provider != "openai" or not settings.openai_api_key:
+        await msg.reply_text("EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY 설정이 필요해요.")
+        return
+
+    limit = max(50, min(300, int(settings.taste_bookmarks_limit) * 4))
+    max_clusters = max(2, min(8, int(settings.taste_max_clusters)))
+
+    items = []
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            items = list_recent_bookmarks_all_postgres(conn, limit=limit)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            items = list_recent_bookmarks_all_sqlite(conn, limit=limit)
+        finally:
+            conn.close()
+
+    if not items:
+        await msg.reply_text("아직 북클럽 책갈피가 없어요.")
+        return
+
+    texts = [b.text for b in items]
+    try:
+        embeddings = await asyncio.to_thread(
+            _get_openai_embeddings,
+            settings.openai_api_key,
+            settings.openai_embeddings_model,
+            texts,
+        )
+    except Exception:
+        logger.info("Failed to fetch embeddings for club_taste", exc_info=True)
+        await msg.reply_text("지금은 북클럽 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    snapshot, _themes = _taste_snapshot_from_bookmarks(bookmarks=items, embeddings=embeddings, max_clusters=max_clusters)
+    await msg.reply_text("북클럽 전체 취향 스냅샷(종합)\n\n" + snapshot)
 
 
 async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -823,6 +903,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("bookmark_delete", cmd_bookmark_delete))
     app.add_handler(CommandHandler("taste", cmd_taste))
     app.add_handler(CommandHandler("taste_member", cmd_taste_member))
+    app.add_handler(CommandHandler("club_taste", cmd_club_taste))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))

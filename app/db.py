@@ -484,3 +484,133 @@ def enforce_bookmarks_limit_postgres(
     conn.commit()
     return deleted
 
+
+def find_user_id_by_username_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    username: str,
+) -> Optional[int]:
+    uname = username.lstrip("@").strip()
+    if not uname:
+        return None
+    row = conn.execute(
+        """
+        SELECT telegram_user_id
+        FROM bookmarks
+        WHERE telegram_username = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (uname,),
+    ).fetchone()
+    if row is None:
+        # fallback to progress events
+        row = conn.execute(
+            """
+            SELECT telegram_user_id
+            FROM progress_events
+            WHERE telegram_username = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (uname,),
+        ).fetchone()
+    if row is None:
+        return None
+    return int(row["telegram_user_id"])
+
+
+def find_user_id_by_username_postgres(
+    conn: psycopg.Connection,
+    *,
+    username: str,
+) -> Optional[int]:
+    uname = username.lstrip("@").strip()
+    if not uname:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT telegram_user_id
+            FROM bookmarks
+            WHERE telegram_username = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (uname,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            cur.execute(
+                """
+                SELECT telegram_user_id
+                FROM progress_events
+                WHERE telegram_username = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (uname,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return None
+    return int(row[0])
+
+
+def list_recent_bookmarks_all_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 200,
+) -> List[Bookmark]:
+    rows = conn.execute(
+        """
+        SELECT id, telegram_user_id, telegram_username, full_name, page, text, created_at_iso
+        FROM bookmarks
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [
+        Bookmark(
+            id=int(r["id"]),
+            telegram_user_id=int(r["telegram_user_id"]),
+            telegram_username=r["telegram_username"],
+            full_name=r["full_name"],
+            page=r["page"],
+            text=r["text"],
+            created_at_iso=r["created_at_iso"],
+        )
+        for r in rows
+    ]
+
+
+def list_recent_bookmarks_all_postgres(
+    conn: psycopg.Connection,
+    *,
+    limit: int = 200,
+) -> List[Bookmark]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, telegram_user_id, telegram_username, full_name, page, text, created_at_iso
+            FROM bookmarks
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+    return [
+        Bookmark(
+            id=int(r[0]),
+            telegram_user_id=int(r[1]),
+            telegram_username=r[2],
+            full_name=r[3],
+            page=r[4],
+            text=r[5],
+            created_at_iso=r[6],
+        )
+        for r in rows
+    ]
+
