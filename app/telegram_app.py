@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from telegram import Update
+from telegram import ChatMember, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -29,8 +30,54 @@ def _default_weekly_check_cfg() -> WeeklyCheckConfig:
     # Phase 1: hardcoded; later connect to Notion/DB "Books" + weekly plan.
     return WeeklyCheckConfig(week_number=1, range_label="Chapter 1 ~ 3")
 
+def _is_active_member_status(status: str) -> bool:
+    return status in ("creator", "administrator", "member", ChatMember.OWNER, ChatMember.ADMINISTRATOR, ChatMember.MEMBER)
+
+
+async def _is_member_of(chat_id: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+
+    if user is None:
+        return False
+
+    try:
+        member = await context.bot.get_chat_member(chat_id=chat_id, user_id=user.id)
+        if _is_active_member_status(getattr(member, "status", "")):
+            return True
+    except TelegramError:
+        logger.info("Failed to check chat member", exc_info=True)
+
+    return False
+
+
+async def _require_member_or_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    settings: Settings = context.application.bot_data["settings"]
+    msg = update.effective_message
+
+    ok = await _is_member_of(settings.member_chat_id, update, context) or await _is_member_of(
+        settings.admin_chat_id, update, context
+    )
+    if ok:
+        return True
+    if msg is not None:
+        await msg.reply_text("이 봇은 북클럽 멤버/운영진만 사용할 수 있어요.")
+    return False
+
+
+async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    settings: Settings = context.application.bot_data["settings"]
+    msg = update.effective_message
+    ok = await _is_member_of(settings.admin_chat_id, update, context)
+    if ok:
+        return True
+    if msg is not None:
+        await msg.reply_text("이 명령은 운영진 방 멤버만 사용할 수 있어요.")
+    return False
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
     await update.message.reply_text(
         "AI Reading Club Agent입니다.\n\n"
         "운영자: /send_weekly_check 로 주간 진도체크를 보낼 수 있어요.",
@@ -41,6 +88,8 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     Prints chat_id for the current chat (group/supergroup/private).
     Useful for setting TELEGRAM_CHAT_ID env var.
     """
+    if not await _require_admin(update, context):
+        return
     msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -68,6 +117,8 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
     msg = update.effective_message
     if msg is None:
         return
@@ -78,14 +129,14 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "- /start: 봇 소개",
             "- /guide: 사용법 안내",
-            "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 TELEGRAM_CHAT_ID 설정용)",
-            "- /send_weekly_check: (운영자) 주간 진도 체크 메시지 전송",
+            "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 MEMBER_CHAT_ID/ADMIN_CHAT_ID 설정용)",
+            "- /send_weekly_check: (운영진) 북클럽 단체방에 주간 진도 체크 메시지 전송",
             "",
             "빠른 시작",
             "1) 봇을 독서모임 그룹에 초대",
             "2) 그룹에서 /chatid 로 chat_id 복사",
-            "3) Railway Variables에 TELEGRAM_CHAT_ID로 저장",
-            "4) 그룹에서 /send_weekly_check 실행 후 버튼 응답 확인",
+            "3) Railway Variables에 MEMBER_CHAT_ID/ADMIN_CHAT_ID로 저장",
+            "4) 운영진 방에서 /send_weekly_check 실행",
         ]
     )
 
@@ -94,11 +145,14 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.application.bot_data["settings"]
+    if not await _require_admin(update, context):
+        return
+
     cfg = _default_weekly_check_cfg()
     text, markup = build_weekly_check_message(cfg)
 
     await context.bot.send_message(
-        chat_id=settings.telegram_chat_id,
+        chat_id=settings.member_chat_id,
         text=text,
         reply_markup=markup,
     )
@@ -106,6 +160,12 @@ async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def on_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Callbacks should only be accepted from actual book-club members group participants.
+    settings: Settings = context.application.bot_data["settings"]
+    if not await _is_member_of(settings.member_chat_id, update, context):
+        if update.callback_query is not None:
+            await update.callback_query.answer("북클럽 멤버만 응답할 수 있어요.", show_alert=True)
+        return
     query = update.callback_query
     if query is None:
         return
