@@ -74,11 +74,23 @@ async def _run(app: Application) -> None:
         url = _webhook_target_url()
         for attempt in range(1, 21):
             try:
+                # Best-effort: clear any previous webhook first (ignore failures)
+                try:
+                    await app.bot.delete_webhook(drop_pending_updates=False)
+                except Exception:
+                    logger.info("delete_webhook failed (ignored)", exc_info=True)
+
                 await app.bot.set_webhook(
                     url=url,
                     secret_token=settings.webhook_secret_token or None,
                 )
                 logger.info("Webhook set to %s", url)
+                # Once webhook is active, stop polling fallback to avoid getUpdates/webhook conflict.
+                try:
+                    await app.updater.stop()
+                    logger.info("Polling stopped after webhook set")
+                except Exception:
+                    logger.info("Stopping polling failed (ignored)", exc_info=True)
                 return
             except Exception as e:
                 wait_s = min(30, 2 * attempt)
@@ -91,20 +103,27 @@ async def _run(app: Application) -> None:
                 )
                 await asyncio.sleep(wait_s)
 
-    polling_queue = None
-    if not settings.webhook_url:
-        polling_queue = await app.updater.start_polling(
-            allowed_updates=["message", "callback_query"],
-        )
-    else:
+    # Start polling as a temporary fallback so commands like /chatid work even if webhook
+    # registration is still failing. Once webhook is set successfully, polling will be stopped.
+    polling_started = False
+    if settings.webhook_url:
+        try:
+            await app.updater.start_polling(allowed_updates=["message", "callback_query"])
+            polling_started = True
+            logger.info("Polling started temporarily until webhook is set")
+        except Exception:
+            logger.warning("Failed to start polling fallback", exc_info=True)
         asyncio.create_task(ensure_webhook())
+    else:
+        await app.updater.start_polling(allowed_updates=["message", "callback_query"])
+        polling_started = True
 
     # Run forever until cancelled / terminated
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
-        if polling_queue is not None:
+        if polling_started:
             await app.updater.stop()
         await runner.cleanup()
         await app.stop()
