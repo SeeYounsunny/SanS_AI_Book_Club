@@ -19,6 +19,8 @@ from app.db import (
     connect_sqlite,
     delete_bookmark_postgres,
     delete_bookmark_sqlite,
+    enforce_bookmarks_limit_postgres,
+    enforce_bookmarks_limit_sqlite,
     init_db_postgres,
     init_db_sqlite,
     insert_bookmark_postgres,
@@ -297,6 +299,9 @@ async def cmd_bookmark(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 page=page,
                 text=text,
             )
+            enforce_bookmarks_limit_postgres(
+                conn, telegram_user_id=user.id, max_per_user=settings.bookmarks_max_per_user
+            )
         finally:
             conn.close()
     else:
@@ -310,6 +315,7 @@ async def cmd_bookmark(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 page=page,
                 text=text,
             )
+            enforce_bookmarks_limit_sqlite(conn, telegram_user_id=user.id, max_per_user=settings.bookmarks_max_per_user)
         finally:
             conn.close()
 
@@ -361,7 +367,7 @@ async def cmd_bookmarks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     lines = [header]
     for i, b in enumerate(items, start=1):
         page_part = f"p.{b.page} " if b.page is not None else ""
-        lines.append(f"{i}. #{b.id} {page_part}{b.text}")
+        lines.append(f"- #{b.id} {page_part}\"{b.text}\"")
     await msg.reply_text("\n".join(lines))
 
 

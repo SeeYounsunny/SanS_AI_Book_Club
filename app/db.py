@@ -433,3 +433,54 @@ def delete_bookmark_postgres(
     conn.commit()
     return deleted
 
+
+def enforce_bookmarks_limit_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    telegram_user_id: int,
+    max_per_user: int,
+) -> int:
+    if max_per_user <= 0:
+        return 0
+    # Delete oldest rows over the limit
+    cur = conn.execute(
+        """
+        DELETE FROM bookmarks
+        WHERE id IN (
+            SELECT id FROM bookmarks
+            WHERE telegram_user_id = ?
+            ORDER BY id DESC
+            LIMIT -1 OFFSET ?
+        )
+        """,
+        (telegram_user_id, max_per_user),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def enforce_bookmarks_limit_postgres(
+    conn: psycopg.Connection,
+    *,
+    telegram_user_id: int,
+    max_per_user: int,
+) -> int:
+    if max_per_user <= 0:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM bookmarks
+            WHERE id IN (
+                SELECT id FROM bookmarks
+                WHERE telegram_user_id = %s
+                ORDER BY id DESC
+                OFFSET %s
+            )
+            """,
+            (telegram_user_id, max_per_user),
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted
+

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     timezone: str = Field(default="Asia/Seoul", alias="TIMEZONE")
     db_path: str = Field(default="./data/reading_club.sqlite3", alias="DB_PATH")
     database_url: Optional[str] = Field(default=None, alias="DATABASE_URL")
+    bookmarks_max_per_user: int = Field(default=500, alias="BOOKMARKS_MAX_PER_USER")
 
     # Webhook mode: if webhook_url is set, we will start webhook server.
     webhook_url: Optional[str] = Field(default=None, alias="WEBHOOK_URL")
