@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from aiohttp import web
+from telegram import Update
 from telegram.ext import Application
 
 from app.config import get_settings
@@ -24,19 +26,42 @@ async def _run_webhook(app: Application) -> None:
         secret_token=settings.webhook_secret_token or None,
     )
 
-    # PTB's webhook server path is configured via webhook_url + url_path.
-    # We'll use url_path="telegram/webhook" and bind to 0.0.0.0:<PORT>
     await app.start()
-    await app.updater.start_webhook(
-        listen="0.0.0.0",
-        port=settings.port,
-        url_path="telegram/webhook",
-        secret_token=settings.webhook_secret_token or None,
-    )
 
-    await app.updater.wait_until_closed()
-    await app.stop()
-    await app.shutdown()
+    async def health(_: web.Request) -> web.Response:
+        return web.json_response({"ok": True})
+
+    async def telegram_webhook(request: web.Request) -> web.Response:
+        # Optional verification: Telegram sends X-Telegram-Bot-Api-Secret-Token if configured.
+        expected = settings.webhook_secret_token
+        if expected:
+            provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if provided != expected:
+                return web.Response(status=401, text="unauthorized")
+
+        data = await request.json()
+        update = Update.de_json(data, app.bot)
+        await app.process_update(update)
+        return web.json_response({"ok": True})
+
+    aiohttp_app = web.Application()
+    aiohttp_app.router.add_get("/", health)
+    aiohttp_app.router.add_get("/healthz", health)
+    aiohttp_app.router.add_post("/telegram/webhook", telegram_webhook)
+
+    runner = web.AppRunner(aiohttp_app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=settings.port)
+    await site.start()
+
+    # Run forever until cancelled / terminated
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await runner.cleanup()
+        await app.stop()
+        await app.shutdown()
 
 
 def _run_polling(app: Application) -> None:
