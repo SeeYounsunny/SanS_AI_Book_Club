@@ -67,6 +67,31 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await msg.reply_text("\n".join(lines))
 
 
+async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    if msg is None:
+        return
+
+    text = "\n".join(
+        [
+            "사용 가능한 명령어",
+            "",
+            "- /start: 봇 소개",
+            "- /guide: 사용법 안내",
+            "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 TELEGRAM_CHAT_ID 설정용)",
+            "- /send_weekly_check: (운영자) 주간 진도 체크 메시지 전송",
+            "",
+            "빠른 시작",
+            "1) 봇을 독서모임 그룹에 초대",
+            "2) 그룹에서 /chatid 로 chat_id 복사",
+            "3) Railway Variables에 TELEGRAM_CHAT_ID로 저장",
+            "4) 그룹에서 /send_weekly_check 실행 후 버튼 응답 확인",
+        ]
+    )
+
+    await msg.reply_text(text)
+
+
 async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.application.bot_data["settings"]
     cfg = _default_weekly_check_cfg()
@@ -159,6 +184,7 @@ def build_application(settings: Settings) -> Application:
             sqlite_conn.close()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("guide", cmd_guide))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
