@@ -21,12 +21,6 @@ async def _run(app: Application) -> None:
     settings = app.bot_data["settings"]
 
     await app.initialize()
-    if settings.webhook_url:
-        await app.bot.set_webhook(
-            url=f"{settings.webhook_url.rstrip('/')}/telegram/webhook",
-            secret_token=settings.webhook_secret_token or None,
-        )
-
     await app.start()
 
     async def health(_: web.Request) -> web.Response:
@@ -58,11 +52,35 @@ async def _run(app: Application) -> None:
     site = web.TCPSite(runner, host="0.0.0.0", port=settings.port)
     await site.start()
 
+    async def ensure_webhook() -> None:
+        if not settings.webhook_url:
+            return
+        url = f"{settings.webhook_url.rstrip('/')}/telegram/webhook"
+        for attempt in range(1, 21):
+            try:
+                await app.bot.set_webhook(
+                    url=url,
+                    secret_token=settings.webhook_secret_token or None,
+                )
+                logging.getLogger(__name__).info("Webhook set to %s", url)
+                return
+            except Exception:
+                wait_s = min(30, 2 * attempt)
+                logging.getLogger(__name__).warning(
+                    "Failed to set webhook (attempt %s). Retrying in %ss",
+                    attempt,
+                    wait_s,
+                    exc_info=True,
+                )
+                await asyncio.sleep(wait_s)
+
     polling_queue = None
     if not settings.webhook_url:
         polling_queue = await app.updater.start_polling(
             allowed_updates=["message", "callback_query"],
         )
+    else:
+        asyncio.create_task(ensure_webhook())
 
     # Run forever until cancelled / terminated
     try:
