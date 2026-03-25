@@ -23,6 +23,16 @@ async def _run(app: Application) -> None:
     await app.initialize()
     await app.start()
 
+    def _webhook_target_url() -> str:
+        base = (settings.webhook_url or "").strip()
+        base = base.rstrip("/")
+        # Allow either:
+        # - WEBHOOK_URL="https://xxx.up.railway.app"
+        # - WEBHOOK_URL="https://xxx.up.railway.app/telegram/webhook"
+        if base.endswith("/telegram/webhook"):
+            return base
+        return f"{base}/telegram/webhook"
+
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
 
@@ -55,7 +65,7 @@ async def _run(app: Application) -> None:
     async def ensure_webhook() -> None:
         if not settings.webhook_url:
             return
-        url = f"{settings.webhook_url.rstrip('/')}/telegram/webhook"
+        url = _webhook_target_url()
         for attempt in range(1, 21):
             try:
                 await app.bot.set_webhook(
@@ -64,11 +74,12 @@ async def _run(app: Application) -> None:
                 )
                 logging.getLogger(__name__).info("Webhook set to %s", url)
                 return
-            except Exception:
+            except Exception as e:
                 wait_s = min(30, 2 * attempt)
                 logging.getLogger(__name__).warning(
-                    "Failed to set webhook (attempt %s). Retrying in %ss",
+                    "Failed to set webhook (attempt %s): %s. Retrying in %ss",
                     attempt,
+                    str(e),
                     wait_s,
                     exc_info=True,
                 )
