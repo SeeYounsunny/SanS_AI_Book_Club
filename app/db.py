@@ -79,6 +79,17 @@ def init_db_sqlite(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS club_month_settings (
+            month TEXT NOT NULL,           -- YYYY-MM
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            updated_at_iso TEXT NOT NULL,
+            PRIMARY KEY (month, key)
+        )
+        """
+    )
     conn.commit()
 
 
@@ -116,6 +127,17 @@ def init_db_postgres(conn: psycopg.Connection) -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at_iso TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS club_month_settings (
+                month TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at_iso TEXT NOT NULL,
+                PRIMARY KEY (month, key)
             )
             """
         )
@@ -163,6 +185,71 @@ def set_setting_postgres(conn: psycopg.Connection, *, key: str, value: str, now:
 def get_setting_postgres(conn: psycopg.Connection, *, key: str) -> Optional[str]:
     with conn.cursor() as cur:
         cur.execute("SELECT value FROM club_settings WHERE key = %s LIMIT 1", (key,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return str(row[0])
+
+
+def set_month_setting_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    month: str,
+    key: str,
+    value: str,
+    now: Optional[datetime] = None,
+) -> None:
+    if now is None:
+        now = datetime.utcnow()
+    updated_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+    conn.execute(
+        """
+        INSERT INTO club_month_settings(month, key, value, updated_at_iso)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(month, key) DO UPDATE SET value=excluded.value, updated_at_iso=excluded.updated_at_iso
+        """,
+        (month, key, value, updated_at_iso),
+    )
+    conn.commit()
+
+
+def get_month_setting_sqlite(conn: sqlite3.Connection, *, month: str, key: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT value FROM club_month_settings WHERE month = ? AND key = ? LIMIT 1", (month, key)
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row["value"])
+
+
+def set_month_setting_postgres(
+    conn: psycopg.Connection,
+    *,
+    month: str,
+    key: str,
+    value: str,
+    now: Optional[datetime] = None,
+) -> None:
+    if now is None:
+        now = datetime.utcnow()
+    updated_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO club_month_settings(month, key, value, updated_at_iso)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (month, key) DO UPDATE SET value = EXCLUDED.value, updated_at_iso = EXCLUDED.updated_at_iso
+            """,
+            (month, key, value, updated_at_iso),
+        )
+    conn.commit()
+
+
+def get_month_setting_postgres(conn: psycopg.Connection, *, month: str, key: str) -> Optional[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM club_month_settings WHERE month = %s AND key = %s LIMIT 1", (month, key)
+        )
         row = cur.fetchone()
     if row is None:
         return None

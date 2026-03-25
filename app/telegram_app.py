@@ -40,6 +40,8 @@ from app.db import (
     is_postgres_url,
     get_setting_postgres,
     get_setting_sqlite,
+    get_month_setting_postgres,
+    get_month_setting_sqlite,
     list_bookmarks_postgres,
     list_bookmarks_sqlite,
     list_recent_bookmarks_all_postgres,
@@ -48,6 +50,8 @@ from app.db import (
     update_bookmark_sqlite,
     set_setting_postgres,
     set_setting_sqlite,
+    set_month_setting_postgres,
+    set_month_setting_sqlite,
 )
 from app.reading_check import WeeklyCheckConfig, build_weekly_check_message
 
@@ -182,12 +186,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
             "- /set_book: 현재 책 제목 설정 (예: /set_book 아무도 미워하지 않는 자의 죽음)",
             "- /set_meeting: 모임 일정 설정 (예: /set_meeting 2026-04-10 또는 /set_meeting 2026-04-10 20:00)",
+            "- /set_month: 설정/조회 기준 월 설정 (예: /set_month 2026-04)",
             "- /book_search: 책 검색 (Google Books) (예: /book_search 아무도 미워하지 않는 자의 죽음)",
             "- /book_select: 검색 결과 중 책 확정 (예: /book_select 1)",
             "- /build_book_summary: 확정된 책 소개를 1~3줄로 요약(선택)",
             "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
             "- /set_pages: 총 페이지 수 수동 설정(보정) (예: /set_pages 320)",
-            "- /show_book: 현재 책/모임 일정 확인",
+            "- /show_book: (기준 월) 책/모임 일정 확인",
             "- /taste_member: 특정 멤버 취향 스냅샷 보기 (예: /taste_member @username 또는 /taste_member 123456789)",
             "- /club_taste: 북클럽 전체 취향 스냅샷(종합)",
             "- /taste_summary: (멤버 1:1) 취향 요약 1~3줄 (LLM)",
@@ -224,6 +229,7 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "이번 책 정보",
             "- /book",
+            "- /book_month 2026-04",
             "- /plan",
             "",
             "책갈피(문장 메모) — 1:1 대화에서만",
@@ -267,6 +273,71 @@ async def cmd_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _clean_one_line(s: Optional[str]) -> str:
     return " ".join((s or "").replace("\n", " ").split()).strip()
+
+def _current_month_yyyy_mm() -> str:
+    return datetime.now().strftime("%Y-%m")
+
+
+def _parse_month_yyyy_mm(raw: str) -> Optional[str]:
+    s = (raw or "").strip()
+    try:
+        dt = datetime.strptime(s, "%Y-%m")
+    except ValueError:
+        return None
+    return dt.strftime("%Y-%m")
+
+
+def _get_active_month(settings: Settings) -> str:
+    # Stored in club_settings as "active_month" (YYYY-MM). Fallback to current month.
+    active = None
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            active = get_setting_postgres(conn, key="active_month")
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            active = get_setting_sqlite(conn, key="active_month")
+        finally:
+            conn.close()
+    parsed = _parse_month_yyyy_mm(active or "")
+    return parsed or _current_month_yyyy_mm()
+
+
+def _set_active_month(settings: Settings, month: str) -> None:
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            set_setting_postgres(conn, key="active_month", value=month)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            set_setting_sqlite(conn, key="active_month", value=month)
+        finally:
+            conn.close()
+
+
+async def cmd_set_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    if not context.args:
+        month = _get_active_month(settings)
+        await msg.reply_text(f"현재 기준 월: {month}\n사용법: /set_month 2026-04")
+        return
+    month = _parse_month_yyyy_mm(context.args[0])
+    if not month:
+        await msg.reply_text("사용법: /set_month 2026-04")
+        return
+    _set_active_month(settings, month)
+    await msg.reply_text(f"기준 월을 설정했어요: {month}")
 
 
 def _truncate(s: str, *, max_len: int) -> str:
@@ -414,39 +485,56 @@ async def cmd_book_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     description = (b.get("description") or "").strip()
     info_link = (b.get("info_link") or "").strip()
 
-    def _set(key: str, value: Optional[str]) -> None:
+    month = _get_active_month(settings)
+
+    def _set_monthly(key: str, value: Optional[str]) -> None:
         if not value:
             return
         if is_postgres_url(settings.database_url):
             conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
             try:
-                set_setting_postgres(conn, key=key, value=value)
+                set_month_setting_postgres(conn, month=month, key=key, value=value)
             finally:
                 conn.close()
         else:
             conn = connect_sqlite(settings.db_path)
             try:
-                set_setting_sqlite(conn, key=key, value=value)
+                set_month_setting_sqlite(conn, month=month, key=key, value=value)
             finally:
                 conn.close()
 
-    # Persist: book_title is used elsewhere (taste_summary prompt)
-    _set("book_title", title)
-    _set("book_authors", authors)
-    _set("book_isbn", isbn)
-    _set("book_published", published)
-    _set("book_publisher", publisher)
-    _set("book_info_link", info_link)
+    # Persist monthly. Also store book_title in legacy global key for compatibility where needed.
+    _set_monthly("book_title", title)
+    _set_monthly("book_authors", authors)
+    _set_monthly("book_isbn", isbn)
+    _set_monthly("book_published", published)
+    _set_monthly("book_publisher", publisher)
+    _set_monthly("book_info_link", info_link)
     if isinstance(pages, int):
-        _set("book_page_count", str(pages))
+        _set_monthly("book_page_count", str(pages))
     if description:
-        _set("book_description", description)
+        _set_monthly("book_description", description)
+
+    # keep global book_title for taste_summary prompt fallback
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            set_setting_postgres(conn, key="book_title", value=title)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            set_setting_sqlite(conn, key="book_title", value=title)
+        finally:
+            conn.close()
 
     context.user_data.pop("book_search_results", None)
     await msg.reply_text(
         "\n".join(
             [
                 "책을 확정했어요.",
+                f"- 월: {month}",
                 f"- 제목: {title}",
                 f"- 저자: {authors or '(미상)'}",
                 f"- 페이지: {str(pages) + 'p' if isinstance(pages, int) else '(미상)'}",
@@ -456,8 +544,25 @@ async def cmd_book_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
-def _load_club_book_info(settings: Settings) -> dict:
-    def _get(key: str) -> Optional[str]:
+def _load_club_book_info(settings: Settings, *, month: Optional[str] = None) -> dict:
+    m = _parse_month_yyyy_mm(month or "") or _get_active_month(settings)
+
+    def _get_monthly(key: str) -> Optional[str]:
+        if is_postgres_url(settings.database_url):
+            conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+            try:
+                v = get_month_setting_postgres(conn, month=m, key=key)
+            finally:
+                conn.close()
+        else:
+            conn = connect_sqlite(settings.db_path)
+            try:
+                v = get_month_setting_sqlite(conn, month=m, key=key)
+            finally:
+                conn.close()
+        if v is not None:
+            return v
+        # fallback to legacy global storage
         if is_postgres_url(settings.database_url):
             conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
             try:
@@ -471,20 +576,22 @@ def _load_club_book_info(settings: Settings) -> dict:
             conn.close()
 
     return {
-        "title": _get("book_title"),
-        "authors": _get("book_authors"),
-        "isbn": _get("book_isbn"),
-        "page_count": _get("book_page_count"),
-        "published": _get("book_published"),
-        "publisher": _get("book_publisher"),
-        "info_link": _get("book_info_link"),
-        "description": _get("book_description"),
-        "summary": _get("book_summary"),
-        "meeting_at": _get("meeting_at"),
+        "month": m,
+        "title": _get_monthly("book_title"),
+        "authors": _get_monthly("book_authors"),
+        "isbn": _get_monthly("book_isbn"),
+        "page_count": _get_monthly("book_page_count"),
+        "published": _get_monthly("book_published"),
+        "publisher": _get_monthly("book_publisher"),
+        "info_link": _get_monthly("book_info_link"),
+        "description": _get_monthly("book_description"),
+        "summary": _get_monthly("book_summary"),
+        "meeting_at": _get_monthly("meeting_at"),
     }
 
 
 def _format_book_info_message(info: dict, *, include_description: bool = True) -> str:
+    month = info.get("month") or ""
     title = info.get("title") or "(미설정)"
     authors = info.get("authors") or "(미상)"
     meeting_at = info.get("meeting_at") or "(미설정)"
@@ -500,7 +607,7 @@ def _format_book_info_message(info: dict, *, include_description: bool = True) -
     meta = " / ".join(meta_parts).strip()
 
     lines = [
-        "이번 모임 책 정보",
+        "이달의 책 정보" + (f" ({month})" if month else ""),
         "",
         f"- 제목: {title}",
         f"- 저자: {authors}",
@@ -600,16 +707,17 @@ async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_T
     lines = lines[:3]
     summary = "\n".join(lines)
 
+    month = info.get("month") or _get_active_month(settings)
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
-            set_setting_postgres(conn, key="book_summary", value=summary)
+            set_month_setting_postgres(conn, month=month, key="book_summary", value=summary)
         finally:
             conn.close()
     else:
         conn = connect_sqlite(settings.db_path)
         try:
-            set_setting_sqlite(conn, key="book_summary", value=summary)
+            set_month_setting_sqlite(conn, month=month, key="book_summary", value=summary)
         finally:
             conn.close()
 
@@ -624,6 +732,23 @@ async def cmd_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if msg is None:
         return
     info = _load_club_book_info(settings)
+    await msg.reply_text(_format_book_info_message(info))
+
+async def cmd_book_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_member_or_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    if not context.args:
+        await msg.reply_text("사용법: /book_month 2026-04")
+        return
+    month = _parse_month_yyyy_mm(context.args[0])
+    if not month:
+        await msg.reply_text("사용법: /book_month 2026-04")
+        return
+    info = _load_club_book_info(settings, month=month)
     await msg.reply_text(_format_book_info_message(info))
 
 
@@ -1349,20 +1474,21 @@ async def cmd_set_meeting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await msg.reply_text("사용법: /set_meeting 2026-04-10\n또는: /set_meeting 2026-04-10 20:00")
         return
 
+    month = _get_active_month(settings)
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
-            set_setting_postgres(conn, key="meeting_at", value=meeting_at)
+            set_month_setting_postgres(conn, month=month, key="meeting_at", value=meeting_at)
         finally:
             conn.close()
     else:
         conn = connect_sqlite(settings.db_path)
         try:
-            set_setting_sqlite(conn, key="meeting_at", value=meeting_at)
+            set_month_setting_sqlite(conn, month=month, key="meeting_at", value=meeting_at)
         finally:
             conn.close()
 
-    await msg.reply_text(f"모임 일정을 설정했어요: {meeting_at}")
+    await msg.reply_text(f"모임 일정을 설정했어요: {meeting_at} (월: {month})")
 
 
 async def cmd_show_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1372,26 +1498,15 @@ async def cmd_show_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     settings: Settings = context.application.bot_data["settings"]
     if msg is None:
         return
-    title = None
-    meeting_at = None
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-        try:
-            title = get_setting_postgres(conn, key="book_title")
-            meeting_at = get_setting_postgres(conn, key="meeting_at")
-        finally:
-            conn.close()
-    else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            title = get_setting_sqlite(conn, key="book_title")
-            meeting_at = get_setting_sqlite(conn, key="meeting_at")
-        finally:
-            conn.close()
+    info = _load_club_book_info(settings)
+    month = info.get("month") or ""
+    title = info.get("title")
+    meeting_at = info.get("meeting_at")
     await msg.reply_text(
         "\n".join(
             [
-                f"현재 책: {title or '(미설정)'}",
+                f"기준 월: {month}",
+                f"이달의 책: {title or '(미설정)'}",
                 f"모임 일정: {meeting_at or '(미설정)'}",
             ]
         )
@@ -1413,19 +1528,20 @@ async def cmd_set_pages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await msg.reply_text("총 페이지 수가 올바르지 않아요. (1~5000)")
         return
 
+    month = _get_active_month(settings)
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
-            set_setting_postgres(conn, key="book_page_count", value=str(pages))
+            set_month_setting_postgres(conn, month=month, key="book_page_count", value=str(pages))
         finally:
             conn.close()
     else:
         conn = connect_sqlite(settings.db_path)
         try:
-            set_setting_sqlite(conn, key="book_page_count", value=str(pages))
+            set_month_setting_sqlite(conn, month=month, key="book_page_count", value=str(pages))
         finally:
             conn.close()
-    await msg.reply_text(f"총 페이지를 설정했어요: {pages}p")
+    await msg.reply_text(f"총 페이지를 설정했어요: {pages}p (월: {month})")
 
 
 def _parse_meeting_date_for_plan(meeting_at: str) -> Optional[datetime]:
@@ -1442,7 +1558,7 @@ def _parse_meeting_date_for_plan(meeting_at: str) -> Optional[datetime]:
 
 
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Member-facing plan (allowed for members/admins, but safe in group too)
+    # Member-facing plan (weekly chunks)
     if not await _require_member_or_admin(update, context):
         return
     msg = update.effective_message
@@ -1481,21 +1597,31 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ppd = (pages_to_read + days_readable - 1) // days_readable  # ceil
     ppd = max(5, ppd)
 
-    # Build up to 14 lines; beyond that show first/last and summary
+    # Weekly plan: chunk by 7-day blocks starting today (readable days only)
+    weeks = max(1, (days_readable + 6) // 7)
     lines: List[str] = []
     cur = 1
-    for d in range(days_readable):
+    remaining_days = days_readable
+    for w in range(weeks):
+        week_days = min(7, remaining_days)
+        week_pages = min(total_pages - cur + 1, week_days * ppd)
         start = cur
-        end = min(total_pages, start + ppd - 1)
-        day = today.toordinal() + d
-        date_str = datetime.fromordinal(day).strftime("%m/%d")
-        lines.append(f"{date_str}: p.{start}–{end}")
+        end = min(total_pages, start + week_pages - 1)
+
+        start_day_ord = today.toordinal() + (days_readable - remaining_days)
+        end_day_ord = start_day_ord + week_days - 1
+        start_str = datetime.fromordinal(start_day_ord).strftime("%m/%d")
+        end_str = datetime.fromordinal(end_day_ord).strftime("%m/%d")
+
+        lines.append(f"{w+1}주차 ({start_str}–{end_str}): p.{start}–{end} (약 {ppd}p/일)")
+
         cur = end + 1
+        remaining_days -= week_days
         if cur > total_pages:
             break
-    # If pages remain (due to caps), append note
+
     if cur <= total_pages:
-        lines.append(f"(남은 페이지 p.{cur}–{total_pages}는 중간에 더 읽어야 해요.)")
+        lines.append(f"(남은 페이지 p.{cur}–{total_pages}는 주차 내에서 조금 더 읽어야 해요.)")
 
     header = "\n".join(
         [
@@ -1800,6 +1926,8 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("build_book_summary", cmd_build_book_summary))
     app.add_handler(CommandHandler("send_book_info", cmd_send_book_info))
     app.add_handler(CommandHandler("book", cmd_book))
+    app.add_handler(CommandHandler("book_month", cmd_book_month))
+    app.add_handler(CommandHandler("set_month", cmd_set_month))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
 
