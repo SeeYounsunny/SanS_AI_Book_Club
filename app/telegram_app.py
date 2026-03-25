@@ -211,7 +211,7 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "- 수정 예시1: /bookmark_edit #id 수정할 문장",
             "- 수정 예시2: /bookmark_edit #id 페이지번호 | 수정할 문장",
-            "  예) /bookmark_edit #3 57 | 불가능해 보이는 것조차 실행하라 - 마르쿠스 아우렐리우스"
+            "  예) /bookmark_edit #3 57 | 불가능해 보이는 것조차 실행하라 - 마르쿠스 아우렐리우스",
             "- 삭제 예시: /bookmark_delete #id",
             "  예) /bookmark_delete #3",
             "  (여기서 #3은 /bookmarks 목록 맨앞에 보이는 #id예요)",
