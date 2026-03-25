@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 import psycopg
 
@@ -15,6 +15,17 @@ class ProgressEvent:
     full_name: Optional[str]
     week_number: int
     status: str  # done | partial | not_yet
+    created_at_iso: str
+
+
+@dataclass(frozen=True)
+class Bookmark:
+    id: int
+    telegram_user_id: int
+    telegram_username: Optional[str]
+    full_name: Optional[str]
+    page: Optional[int]
+    text: str
     created_at_iso: str
 
 
@@ -46,6 +57,19 @@ def init_db_sqlite(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bookmarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_user_id INTEGER NOT NULL,
+            telegram_username TEXT,
+            full_name TEXT,
+            page INTEGER,
+            text TEXT NOT NULL,
+            created_at_iso TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -60,6 +84,19 @@ def init_db_postgres(conn: psycopg.Connection) -> None:
                 full_name TEXT,
                 week_number INTEGER NOT NULL,
                 status TEXT NOT NULL,
+                created_at_iso TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                id BIGSERIAL PRIMARY KEY,
+                telegram_user_id BIGINT NOT NULL,
+                telegram_username TEXT,
+                full_name TEXT,
+                page INTEGER,
+                text TEXT NOT NULL,
                 created_at_iso TEXT NOT NULL
             )
             """
@@ -143,4 +180,256 @@ def insert_progress_event_postgres(
         status=status,
         created_at_iso=created_at_iso,
     )
+
+
+def insert_bookmark_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    telegram_user_id: int,
+    telegram_username: Optional[str],
+    full_name: Optional[str],
+    page: Optional[int],
+    text: str,
+    now: Optional[datetime] = None,
+) -> Bookmark:
+    if now is None:
+        now = datetime.utcnow()
+    created_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+
+    cur = conn.execute(
+        """
+        INSERT INTO bookmarks (
+            telegram_user_id, telegram_username, full_name,
+            page, text, created_at_iso
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (telegram_user_id, telegram_username, full_name, page, text, created_at_iso),
+    )
+    conn.commit()
+
+    return Bookmark(
+        id=int(cur.lastrowid),
+        telegram_user_id=telegram_user_id,
+        telegram_username=telegram_username,
+        full_name=full_name,
+        page=page,
+        text=text,
+        created_at_iso=created_at_iso,
+    )
+
+
+def insert_bookmark_postgres(
+    conn: psycopg.Connection,
+    *,
+    telegram_user_id: int,
+    telegram_username: Optional[str],
+    full_name: Optional[str],
+    page: Optional[int],
+    text: str,
+    now: Optional[datetime] = None,
+) -> Bookmark:
+    if now is None:
+        now = datetime.utcnow()
+    created_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+
+    new_id = None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO bookmarks (
+                telegram_user_id, telegram_username, full_name,
+                page, text, created_at_iso
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (telegram_user_id, telegram_username, full_name, page, text, created_at_iso),
+        )
+        row = cur.fetchone()
+        if row:
+            new_id = int(row[0])
+    conn.commit()
+
+    return Bookmark(
+        id=int(new_id or 0),
+        telegram_user_id=telegram_user_id,
+        telegram_username=telegram_username,
+        full_name=full_name,
+        page=page,
+        text=text,
+        created_at_iso=created_at_iso,
+    )
+
+
+def list_bookmarks_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    telegram_user_id: int,
+    query: Optional[str] = None,
+    limit: int = 10,
+) -> List[Bookmark]:
+    if query:
+        rows = conn.execute(
+            """
+            SELECT id, telegram_user_id, telegram_username, full_name, page, text, created_at_iso
+            FROM bookmarks
+            WHERE telegram_user_id = ?
+              AND text LIKE '%' || ? || '%'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (telegram_user_id, query, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, telegram_user_id, telegram_username, full_name, page, text, created_at_iso
+            FROM bookmarks
+            WHERE telegram_user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (telegram_user_id, limit),
+        ).fetchall()
+    return [
+        Bookmark(
+            id=int(r["id"]),
+            telegram_user_id=int(r["telegram_user_id"]),
+            telegram_username=r["telegram_username"],
+            full_name=r["full_name"],
+            page=r["page"],
+            text=r["text"],
+            created_at_iso=r["created_at_iso"],
+        )
+        for r in rows
+    ]
+
+
+def list_bookmarks_postgres(
+    conn: psycopg.Connection,
+    *,
+    telegram_user_id: int,
+    query: Optional[str] = None,
+    limit: int = 10,
+) -> List[Bookmark]:
+    with conn.cursor() as cur:
+        if query:
+            cur.execute(
+                """
+                SELECT id, telegram_user_id, telegram_username, full_name, page, text, created_at_iso
+                FROM bookmarks
+                WHERE telegram_user_id = %s
+                  AND text ILIKE %s
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (telegram_user_id, f"%{query}%", limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, telegram_user_id, telegram_username, full_name, page, text, created_at_iso
+                FROM bookmarks
+                WHERE telegram_user_id = %s
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (telegram_user_id, limit),
+            )
+        rows = cur.fetchall()
+    return [
+        Bookmark(
+            id=int(r[0]),
+            telegram_user_id=int(r[1]),
+            telegram_username=r[2],
+            full_name=r[3],
+            page=r[4],
+            text=r[5],
+            created_at_iso=r[6],
+        )
+        for r in rows
+    ]
+
+
+def update_bookmark_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    bookmark_id: int,
+    telegram_user_id: int,
+    page: Optional[int],
+    text: str,
+) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE bookmarks
+        SET page = ?, text = ?
+        WHERE id = ?
+          AND telegram_user_id = ?
+        """,
+        (page, text, bookmark_id, telegram_user_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def update_bookmark_postgres(
+    conn: psycopg.Connection,
+    *,
+    bookmark_id: int,
+    telegram_user_id: int,
+    page: Optional[int],
+    text: str,
+) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE bookmarks
+            SET page = %s, text = %s
+            WHERE id = %s
+              AND telegram_user_id = %s
+            """,
+            (page, text, bookmark_id, telegram_user_id),
+        )
+        updated = cur.rowcount > 0
+    conn.commit()
+    return updated
+
+
+def delete_bookmark_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    bookmark_id: int,
+    telegram_user_id: int,
+) -> bool:
+    cur = conn.execute(
+        """
+        DELETE FROM bookmarks
+        WHERE id = ?
+          AND telegram_user_id = ?
+        """,
+        (bookmark_id, telegram_user_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_bookmark_postgres(
+    conn: psycopg.Connection,
+    *,
+    bookmark_id: int,
+    telegram_user_id: int,
+) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM bookmarks
+            WHERE id = %s
+              AND telegram_user_id = %s
+            """,
+            (bookmark_id, telegram_user_id),
+        )
+        deleted = cur.rowcount > 0
+    conn.commit()
+    return deleted
 

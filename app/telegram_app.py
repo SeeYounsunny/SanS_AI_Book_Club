@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from telegram import ChatMember, Update
 from telegram.error import TelegramError
@@ -13,13 +14,22 @@ from telegram.ext import (
 
 from app.config import Settings
 from app.db import (
+    Bookmark,
     connect_postgres,
     connect_sqlite,
+    delete_bookmark_postgres,
+    delete_bookmark_sqlite,
     init_db_postgres,
     init_db_sqlite,
+    insert_bookmark_postgres,
+    insert_bookmark_sqlite,
     insert_progress_event,
     insert_progress_event_postgres,
     is_postgres_url,
+    list_bookmarks_postgres,
+    list_bookmarks_sqlite,
+    update_bookmark_postgres,
+    update_bookmark_sqlite,
 )
 from app.reading_check import WeeklyCheckConfig, build_weekly_check_message
 
@@ -84,6 +94,18 @@ async def _require_member(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if msg is not None:
         await msg.reply_text("이 명령은 북클럽 멤버만 사용할 수 있어요.")
     return False
+
+
+async def _require_private_chat(update: Update) -> bool:
+    chat = update.effective_chat
+    msg = update.effective_message
+    if chat is None:
+        return False
+    if getattr(chat, "type", None) != "private":
+        if msg is not None:
+            await msg.reply_text("이 기능은 봇과의 1:1 대화에서만 사용할 수 있어요.")
+        return False
+    return True
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -175,7 +197,12 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "2) 내가 누른 기록은 저장되나요?",
             "- 네. 버튼을 누르면 이번 주차 상태가 저장돼요.",
             "",
-            "3) 주의사항",
+            "3) 문장 메모(책갈피)는 어떻게 하나요?",
+            "- 저장: /bookmark 120 | 인상 깊은 문장",
+            "- 저장(페이지 없이): /bookmark 인상 깊은 문장",
+            "- 확인: /bookmarks (또는 /bookmarks 20)",
+            "",
+            "4) 주의사항",
             "- 진도 체크 버튼은 '북클럽 단체방' 멤버만 사용할 수 있어요.",
             "",
             "추가 기능(퀴즈/토론 질문/리포트 등)이 생기면 이 안내를 업데이트할게요.",
@@ -204,6 +231,219 @@ async def cmd_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
     )
     await msg.reply_text(text)
+
+
+def _parse_bookmark_args(arg_text: str) -> tuple[Optional[int], str]:
+    """
+    Supported formats:
+    - /bookmark <text>
+    - /bookmark <page> | <text>
+    - /bookmark p<page> | <text>   (e.g. p120 | ...)
+    """
+    raw = (arg_text or "").strip()
+    if not raw:
+        return None, ""
+
+    if "|" not in raw:
+        return None, raw
+
+    left, right = raw.split("|", 1)
+    left = left.strip()
+    right = right.strip()
+    if not right:
+        return None, ""
+
+    left_norm = left.lower().lstrip("p").strip()
+    if left_norm.isdigit():
+        return int(left_norm), right
+
+    return None, raw  # fallback: treat whole as text if page parsing fails
+
+
+async def cmd_bookmark(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private_chat(update):
+        return
+    if not await _require_member(update, context):
+        return
+
+    msg = update.effective_message
+    user = update.effective_user
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None or user is None:
+        return
+
+    arg_text = " ".join(context.args) if context.args else ""
+    page, text = _parse_bookmark_args(arg_text)
+    if not text:
+        await msg.reply_text("사용법: /bookmark 120 | 인상 깊은 문장\n또는: /bookmark 인상 깊은 문장")
+        return
+
+    full_name = " ".join([p for p in [user.first_name, user.last_name] if p]).strip() or None
+
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            insert_bookmark_postgres(
+                conn,
+                telegram_user_id=user.id,
+                telegram_username=user.username,
+                full_name=full_name,
+                page=page,
+                text=text,
+            )
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            insert_bookmark_sqlite(
+                conn,
+                telegram_user_id=user.id,
+                telegram_username=user.username,
+                full_name=full_name,
+                page=page,
+                text=text,
+            )
+        finally:
+            conn.close()
+
+    page_part = f"(p.{page}) " if page is not None else ""
+    await msg.reply_text(f"저장했어요. {page_part}{text}")
+
+
+async def cmd_bookmarks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private_chat(update):
+        return
+    if not await _require_member(update, context):
+        return
+
+    msg = update.effective_message
+    user = update.effective_user
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None or user is None:
+        return
+
+    limit = 10
+    query = None
+    if context.args:
+        if context.args[0].isdigit():
+            limit = max(1, min(30, int(context.args[0])))
+            if len(context.args) > 1:
+                query = " ".join(context.args[1:]).strip() or None
+        else:
+            query = " ".join(context.args).strip() or None
+
+    items = []
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, query=query, limit=limit)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, query=query, limit=limit)
+        finally:
+            conn.close()
+
+    if not items:
+        await msg.reply_text("저장된 문장이 아직 없어요. /bookmark 로 먼저 저장해보세요.")
+        return
+
+    header = "내가 저장한 문장(최근 순)" if not query else f"검색 결과: {query}"
+    lines = [header]
+    for i, b in enumerate(items, start=1):
+        page_part = f"p.{b.page} " if b.page is not None else ""
+        lines.append(f"{i}. #{b.id} {page_part}{b.text}")
+    await msg.reply_text("\n".join(lines))
+
+
+async def cmd_bookmark_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private_chat(update):
+        return
+    if not await _require_member(update, context):
+        return
+
+    msg = update.effective_message
+    user = update.effective_user
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None or user is None:
+        return
+
+    if not context.args:
+        await msg.reply_text("사용법: /bookmark_edit <id> 120 | 새 문장\n또는: /bookmark_edit <id> 새 문장")
+        return
+
+    if not context.args[0].isdigit():
+        await msg.reply_text("사용법: /bookmark_edit <id> 120 | 새 문장")
+        return
+
+    bookmark_id = int(context.args[0])
+    rest = " ".join(context.args[1:]) if len(context.args) > 1 else ""
+    page, text = _parse_bookmark_args(rest)
+    if not text:
+        await msg.reply_text("수정할 문장을 입력해주세요. 예) /bookmark_edit 12 120 | 새 문장")
+        return
+
+    ok = False
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            ok = update_bookmark_postgres(conn, bookmark_id=bookmark_id, telegram_user_id=user.id, page=page, text=text)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            ok = update_bookmark_sqlite(conn, bookmark_id=bookmark_id, telegram_user_id=user.id, page=page, text=text)
+        finally:
+            conn.close()
+
+    if not ok:
+        await msg.reply_text("해당 id의 책갈피를 찾지 못했어요. /bookmarks 로 id를 확인해주세요.")
+        return
+
+    page_part = f"(p.{page}) " if page is not None else ""
+    await msg.reply_text(f"수정했어요. #{bookmark_id} {page_part}{text}")
+
+
+async def cmd_bookmark_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private_chat(update):
+        return
+    if not await _require_member(update, context):
+        return
+
+    msg = update.effective_message
+    user = update.effective_user
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None or user is None:
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await msg.reply_text("사용법: /bookmark_delete <id>")
+        return
+
+    bookmark_id = int(context.args[0])
+    ok = False
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            ok = delete_bookmark_postgres(conn, bookmark_id=bookmark_id, telegram_user_id=user.id)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            ok = delete_bookmark_sqlite(conn, bookmark_id=bookmark_id, telegram_user_id=user.id)
+        finally:
+            conn.close()
+
+    if not ok:
+        await msg.reply_text("해당 id의 책갈피를 찾지 못했어요. /bookmarks 로 id를 확인해주세요.")
+        return
+
+    await msg.reply_text(f"삭제했어요. #{bookmark_id}")
 
 
 async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -310,6 +550,10 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("guide", cmd_guide))
     app.add_handler(CommandHandler("about", cmd_about))
+    app.add_handler(CommandHandler("bookmark", cmd_bookmark))
+    app.add_handler(CommandHandler("bookmarks", cmd_bookmarks))
+    app.add_handler(CommandHandler("bookmark_edit", cmd_bookmark_edit))
+    app.add_handler(CommandHandler("bookmark_delete", cmd_bookmark_delete))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
