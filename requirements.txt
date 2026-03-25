@@ -1,0 +1,8 @@
+python-telegram-bot==21.6
+APScheduler==3.10.4
+python-dotenv==1.0.1
+pydantic==2.9.2
+pydantic-settings==2.6.1
+openai==1.52.2
+aiohttp==3.10.10
+psycopg[binary]==3.2.6
