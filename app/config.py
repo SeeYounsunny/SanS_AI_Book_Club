@@ -21,9 +21,11 @@ class Settings(BaseSettings):
     # Embeddings (for taste snapshot without generative LLM)
     embeddings_provider: str = Field(default="none", alias="EMBEDDINGS_PROVIDER")
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
+    # Cheapest general-purpose OpenAI embeddings model
     openai_embeddings_model: str = Field(default="text-embedding-3-small", alias="OPENAI_EMBEDDINGS_MODEL")
-    taste_bookmarks_limit: int = Field(default=50, alias="TASTE_BOOKMARKS_LIMIT")
-    taste_max_clusters: int = Field(default=5, alias="TASTE_MAX_CLUSTERS")
+    # Keep defaults modest to control cost
+    taste_bookmarks_limit: int = Field(default=30, alias="TASTE_BOOKMARKS_LIMIT")
+    taste_max_clusters: int = Field(default=4, alias="TASTE_MAX_CLUSTERS")
 
     # Webhook mode: if webhook_url is set, we will start webhook server.
     webhook_url: Optional[str] = Field(default=None, alias="WEBHOOK_URL")
