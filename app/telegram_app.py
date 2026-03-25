@@ -200,13 +200,14 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- 네. 버튼을 누르면 이번 주차 상태가 저장돼요.",
             "",
             "3) 문장 메모(책갈피)는 어떻게 하나요?",
-            "- 저장 예시1: /bookmark 120 | 여기 문장을 그대로 붙여넣기",
+            "- 저장 예시1: /bookmark 페이지번호 | 여기 문장을 그대로 붙여넣기",
+            "  예) /bookmark 57 | 여기 문장을 그대로 붙여넣기",
             "- 저장 예시2: /bookmark 여기 문장을 그대로 붙여넣기",
-            "- 확인 예시: /bookmarks",
-            "- 더 많이 보기 예시: /bookmarks 20",
+            "- 확인 예시: /bookmarks  (기본: 최근 10개)",
+            "- 더 많이 보기 예시: /bookmarks 숫자  (숫자만큼 최근 저장 내용 표시)",
+            "  예) /bookmarks 20",
             "- 검색 예시: /bookmarks 용기",
-            "- 검색 + 더 보기 예시: /bookmarks 20 용기",
-            "- 수정 예시: /bookmark_edit 12 120 | 수정한 문장",
+            "- 수정 예시: /bookmark_edit 12 페이지번호 | 수정한 문장",
             "- 삭제 예시: /bookmark_delete 12",
             "  (여기서 12는 /bookmarks 목록에 보이는 #id예요)",
             "",
@@ -366,7 +367,9 @@ async def cmd_bookmarks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await msg.reply_text("저장된 문장이 아직 없어요. /bookmark 로 먼저 저장해보세요.")
         return
 
-    header = "내가 저장한 문장(최근 순)" if not query else f"검색 결과: {query}"
+    header = "내가 저장한 문장(최근 순, 기본 10개)" if not query and limit == 10 else "내가 저장한 문장(최근 순)"
+    if query:
+        header = f"검색 결과: {query}"
     lines = [header]
     for i, b in enumerate(items, start=1):
         page_part = f"p.{b.page} " if b.page is not None else ""
