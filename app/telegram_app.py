@@ -200,18 +200,20 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- 네. 버튼을 누르면 이번 주차 상태가 저장돼요.",
             "",
             "3) 문장 메모(책갈피)는 어떻게 하나요?",
-            "- 저장: /bookmark 120 | 인상 깊은 문장",
-            "- 저장(페이지 없이): /bookmark 인상 깊은 문장",
-            "- 확인: /bookmarks",
-            "- 더 많이 보기: /bookmarks 20  (숫자는 '몇 개 보여줄지'예요. 기본은 10개)",
-            "- 검색: /bookmarks 키워드",
-            "- 검색 + 더 보기: /bookmarks 20 키워드",
-            "- 수정: /bookmark_edit <id> 새 문장",
-            "- 삭제: /bookmark_delete <id>",
+            "- 저장 예시1: /bookmark 120 | 여기 문장을 그대로 붙여넣기",
+            "- 저장 예시2: /bookmark 여기 문장을 그대로 붙여넣기",
+            "- 확인 예시: /bookmarks",
+            "- 더 많이 보기 예시: /bookmarks 20",
+            "- 검색 예시: /bookmarks 용기",
+            "- 검색 + 더 보기 예시: /bookmarks 20 용기",
+            "- 수정 예시: /bookmark_edit 12 120 | 수정한 문장",
+            "- 삭제 예시: /bookmark_delete 12",
+            "  (여기서 12는 /bookmarks 목록에 보이는 #id예요)",
             "",
             "4) 주의사항",
             "- 진도 체크 버튼은 '북클럽 단체방' 멤버만 사용할 수 있어요.",
             "- 책갈피 기능(/bookmark, /bookmarks, 수정/삭제)은 봇과의 1:1 대화에서만 사용할 수 있어요.",
+            "- 책갈피는 1인당 최대 100개까지 저장돼요. 초과하면 오래된 것부터 자동 삭제돼요.",
             "",
             "추가 기능(퀴즈/토론 질문/리포트 등)이 생기면 이 안내를 업데이트할게요.",
         ]
@@ -287,6 +289,7 @@ async def cmd_bookmark(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     full_name = " ".join([p for p in [user.first_name, user.last_name] if p]).strip() or None
+    max_per_user = min(100, max(1, int(settings.bookmarks_max_per_user)))
 
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
@@ -300,7 +303,7 @@ async def cmd_bookmark(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 text=text,
             )
             enforce_bookmarks_limit_postgres(
-                conn, telegram_user_id=user.id, max_per_user=settings.bookmarks_max_per_user
+                conn, telegram_user_id=user.id, max_per_user=max_per_user
             )
         finally:
             conn.close()
@@ -315,7 +318,7 @@ async def cmd_bookmark(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 page=page,
                 text=text,
             )
-            enforce_bookmarks_limit_sqlite(conn, telegram_user_id=user.id, max_per_user=settings.bookmarks_max_per_user)
+            enforce_bookmarks_limit_sqlite(conn, telegram_user_id=user.id, max_per_user=max_per_user)
         finally:
             conn.close()
 
