@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from collections import Counter
+from typing import List
 
 from telegram import ChatMember, Update
 from telegram.error import TelegramError
@@ -160,12 +162,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     text = "\n".join(
         [
-            "사용 가능한 명령어",
+            "운영진용 명령어",
             "",
-            "- /start: 봇 소개",
-            "- /guide: 사용법 안내",
             "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 MEMBER_CHAT_ID/ADMIN_CHAT_ID 설정용)",
-            "- /send_weekly_check: (운영진) 북클럽 단체방에 주간 진도 체크 메시지 전송",
+            "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
             "",
             "빠른 시작",
             "1) 봇을 독서모임 그룹에 초대",
@@ -220,6 +220,7 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- 진도 체크 버튼은 '북클럽 단체방' 멤버만 사용할 수 있어요.",
             "- 책갈피 기능(/bookmark, /bookmarks, 수정/삭제)은 봇과의 1:1 대화에서만 사용할 수 있어요.",
             "- 책갈피는 1인당 최대 100개까지 저장돼요. 초과하면 오래된 것부터 자동 삭제돼요.",
+            "- 취향 요약(베타)은 봇과의 1:1 대화에서 /taste 로 볼 수 있어요.",
             "",
             "추가 기능(퀴즈/토론 질문/리포트 등)이 생기면 이 안내를 업데이트할게요.",
         ]
@@ -479,6 +480,69 @@ async def cmd_bookmark_delete(update: Update, context: ContextTypes.DEFAULT_TYPE
     await msg.reply_text(f"삭제했어요. #{bookmark_id}")
 
 
+def _extract_keywords(texts: List[str]) -> List[str]:
+    # Very lightweight keyword extraction (space-based).
+    # Works best when users include short keywords or phrases.
+    stop = {"그리고", "그런데", "하지만", "그래서", "이건", "저건", "그것", "이것", "저것", "저는", "나는", "내가", "너무"}
+    tokens: List[str] = []
+    for t in texts:
+        for raw in t.replace("\n", " ").split():
+            w = raw.strip(".,!?\"'()[]{}:;~`")
+            if len(w) < 2:
+                continue
+            if w in stop:
+                continue
+            tokens.append(w)
+    return [w for w, _ in Counter(tokens).most_common(8)]
+
+
+async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Member-facing "taste snapshot" based on their bookmarks.
+    if not await _require_private_chat(update):
+        return
+    if not await _require_member(update, context):
+        return
+
+    msg = update.effective_message
+    user = update.effective_user
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None or user is None:
+        return
+
+    items = []
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, limit=100)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, limit=100)
+        finally:
+            conn.close()
+
+    if not items:
+        await msg.reply_text("아직 저장된 책갈피가 없어요. 먼저 /bookmark 로 문장을 저장해보세요.")
+        return
+
+    keywords = _extract_keywords([b.text for b in items])
+    keyword_line = ", ".join(keywords) if keywords else "아직 뚜렷한 키워드가 없어요"
+
+    text = "\n".join(
+        [
+            "내 독서 취향 요약(베타)",
+            "",
+            f"- 저장한 책갈피 수: {len(items)}개 (최근 100개 기준)",
+            f"- 자주 등장한 키워드: {keyword_line}",
+            "",
+            "원하면 책갈피를 더 저장한 뒤 다시 /taste 를 눌러 갱신해보세요.",
+        ]
+    )
+    await msg.reply_text(text)
+
+
 async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.application.bot_data["settings"]
     if not await _require_admin(update, context):
@@ -587,6 +651,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("bookmarks", cmd_bookmarks))
     app.add_handler(CommandHandler("bookmark_edit", cmd_bookmark_edit))
     app.add_handler(CommandHandler("bookmark_delete", cmd_bookmark_delete))
+    app.add_handler(CommandHandler("taste", cmd_taste))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
