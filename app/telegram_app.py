@@ -185,6 +185,27 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await msg.reply_text(text)
 
 
+async def cmd_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_member(update, context):
+        return
+
+    msg = update.effective_message
+    if msg is None:
+        return
+
+    text = "\n".join(
+        [
+            "AI Book Club Bot 소개",
+            "",
+            "이 봇은 온라인 독서모임 운영을 도와주는 텔레그램 봇이에요.",
+            "현재는 매주 올라오는 '진도 체크'에 버튼으로 응답하고, 그 기록을 저장하는 기능을 제공해요.",
+            "",
+            "사용법은 /guide 를 참고해주세요.",
+        ]
+    )
+    await msg.reply_text(text)
+
+
 async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.application.bot_data["settings"]
     if not await _require_admin(update, context):
@@ -288,6 +309,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("guide", cmd_guide))
+    app.add_handler(CommandHandler("about", cmd_about))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
