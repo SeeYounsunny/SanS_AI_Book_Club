@@ -234,7 +234,7 @@ async def cmd_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "이 봇은 독서모임을 ‘꾸준히, 즐겁게’ 이어가도록 돕는 북클럽 도우미예요.",
             "",
-            "- 📈 진도 체크: 매주 올라오는 진도 체크에 버튼으로 응답해요.",
+            "- ✅ 진도 체크: 매주 올라오는 진도 체크에 버튼으로 응답해요.",
             "- 🔖 북마크: 읽다가 마음에 든 문장을 책갈피처럼 저장해요.",
             "- 🧭 취향 요약: 저장한 문장을 바탕으로 내 독서 취향을 조금씩 알아가요. (/taste, 베타)",
             "",
@@ -591,7 +591,7 @@ def _taste_snapshot_from_bookmarks(
             reps.append(f"- {page_part}\"{b.text}\"")
         header = "\n".join(
             [
-                "내 독서 취향 스냅샷(임베딩 기반, 베타)",
+                "내 독서 취향 스냅샷",
                 f"- 분석 기준: 최근 {len(bookmarks)}개 책갈피",
                 "",
                 "아직 책갈피가 적어서 취향을 요약하기엔 데이터가 부족해요.",
@@ -623,7 +623,7 @@ def _taste_snapshot_from_bookmarks(
 
     header = "\n".join(
         [
-            "내 독서 취향 스냅샷(임베딩 기반, 베타)",
+            "내 독서 취향 스냅샷",
             f"- 분석 기준: 최근 {len(bookmarks)}개 책갈피",
             f"- 주요 테마: {', '.join(theme_lines)}" if theme_lines else "- 주요 테마: (분석 중)",
             "",
