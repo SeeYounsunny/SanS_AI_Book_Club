@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Optional
 from collections import Counter
-from typing import List
+from typing import List, Optional, Tuple
+
+from openai import OpenAI
 
 from telegram import ChatMember, Update
 from telegram.error import TelegramError
@@ -166,6 +168,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 MEMBER_CHAT_ID/ADMIN_CHAT_ID 설정용)",
             "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
+            "- /taste_member: 특정 멤버 취향 스냅샷 보기 (예: /taste_member 123456789)",
             "",
             "빠른 시작",
             "1) 봇을 독서모임 그룹에 초대",
@@ -499,6 +502,101 @@ def _extract_keywords(texts: List[str]) -> List[str]:
     return [w for w, _ in Counter(tokens).most_common(8)]
 
 
+def _dot(a: List[float], b: List[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _l2(a: List[float]) -> float:
+    return max(1e-12, sum(x * x for x in a) ** 0.5)
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    return _dot(a, b) / (_l2(a) * _l2(b))
+
+
+def _cluster_embeddings(vectors: List[List[float]], threshold: float = 0.82) -> List[List[int]]:
+    """
+    Greedy clustering by cosine similarity against cluster centroid.
+    Returns clusters of indices.
+    """
+    clusters: List[List[int]] = []
+    centroids: List[List[float]] = []
+
+    for idx, v in enumerate(vectors):
+        best_i = -1
+        best_sim = -1.0
+        for ci, c in enumerate(centroids):
+            sim = _cosine(v, c)
+            if sim > best_sim:
+                best_sim = sim
+                best_i = ci
+
+        if best_sim >= threshold and best_i >= 0:
+            clusters[best_i].append(idx)
+            # update centroid (simple mean)
+            inds = clusters[best_i]
+            dim = len(v)
+            new_c = [0.0] * dim
+            for j in inds:
+                vv = vectors[j]
+                for k in range(dim):
+                    new_c[k] += vv[k]
+            n = float(len(inds))
+            centroids[best_i] = [x / n for x in new_c]
+        else:
+            clusters.append([idx])
+            centroids.append(v)
+
+    # sort by size desc
+    clusters.sort(key=len, reverse=True)
+    return clusters
+
+
+def _get_openai_embeddings(api_key: str, model: str, texts: List[str]) -> List[List[float]]:
+    client = OpenAI(api_key=api_key)
+    resp = client.embeddings.create(model=model, input=texts)
+    # Ensure stable order by index
+    data = sorted(resp.data, key=lambda d: d.index)
+    return [d.embedding for d in data]
+
+
+def _taste_snapshot_from_bookmarks(
+    *,
+    bookmarks: List[Bookmark],
+    embeddings: List[List[float]],
+    max_clusters: int,
+) -> Tuple[str, List[str]]:
+    texts = [b.text for b in bookmarks]
+    clusters = _cluster_embeddings(embeddings, threshold=0.82)[:max_clusters]
+
+    sections: List[str] = []
+    theme_lines: List[str] = []
+    for ci, inds in enumerate(clusters, start=1):
+        cluster_texts = [texts[i] for i in inds]
+        kws = _extract_keywords(cluster_texts)[:5]
+        theme = " / ".join(kws) if kws else "주제"
+        theme_lines.append(theme)
+
+        # representative quotes: first 2 items in cluster order
+        reps = []
+        for i in inds[:2]:
+            b = bookmarks[i]
+            page_part = f"p.{b.page} " if b.page is not None else ""
+            reps.append(f"- {page_part}\"{b.text}\"")
+
+        sections.append("\n".join([f"{ci}) {theme}", *reps]))
+
+    header = "\n".join(
+        [
+            "내 독서 취향 스냅샷(임베딩 기반, 베타)",
+            f"- 분석 기준: 최근 {len(bookmarks)}개 책갈피",
+            f"- 주요 테마: {', '.join(theme_lines)}" if theme_lines else "- 주요 테마: (분석 중)",
+            "",
+        ]
+    )
+    return header + "\n\n".join(sections), theme_lines
+
+
 async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Member-facing "taste snapshot" based on their bookmarks.
     if not await _require_private_chat(update):
@@ -512,17 +610,20 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if msg is None or user is None:
         return
 
+    limit = max(10, min(100, int(settings.taste_bookmarks_limit)))
+    max_clusters = max(2, min(8, int(settings.taste_max_clusters)))
+
     items = []
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
-            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, limit=100)
+            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, limit=limit)
         finally:
             conn.close()
     else:
         conn = connect_sqlite(settings.db_path)
         try:
-            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, limit=100)
+            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, limit=limit)
         finally:
             conn.close()
 
@@ -530,20 +631,86 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("아직 저장된 책갈피가 없어요. 먼저 /bookmark 로 문장을 저장해보세요.")
         return
 
-    keywords = _extract_keywords([b.text for b in items])
-    keyword_line = ", ".join(keywords) if keywords else "아직 뚜렷한 키워드가 없어요"
+    if settings.embeddings_provider != "openai" or not settings.openai_api_key:
+        await msg.reply_text(
+            "취향 스냅샷(임베딩 기반)을 사용하려면 운영진이 EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY를 설정해야 해요."
+        )
+        return
 
-    text = "\n".join(
-        [
-            "내 독서 취향 요약(베타)",
-            "",
-            f"- 저장한 책갈피 수: {len(items)}개 (최근 100개 기준)",
-            f"- 자주 등장한 키워드: {keyword_line}",
-            "",
-            "원하면 책갈피를 더 저장한 뒤 다시 /taste 를 눌러 갱신해보세요.",
-        ]
-    )
-    await msg.reply_text(text)
+    # Fetch embeddings in a thread to avoid blocking the event loop.
+    texts = [b.text for b in items]
+    try:
+        embeddings = await asyncio.to_thread(
+            _get_openai_embeddings,
+            settings.openai_api_key,
+            settings.openai_embeddings_model,
+            texts,
+        )
+    except Exception:
+        logger.info("Failed to fetch embeddings", exc_info=True)
+        await msg.reply_text("지금은 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    snapshot, _themes = _taste_snapshot_from_bookmarks(bookmarks=items, embeddings=embeddings, max_clusters=max_clusters)
+    await msg.reply_text(snapshot)
+
+
+async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Admin-facing taste snapshot for a given member.
+    if not await _require_admin(update, context):
+        return
+
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await msg.reply_text("사용법: /taste_member <telegram_user_id>\n예) /taste_member 123456789")
+        return
+
+    target_user_id = int(context.args[0])
+
+    limit = max(10, min(100, int(settings.taste_bookmarks_limit)))
+    max_clusters = max(2, min(8, int(settings.taste_max_clusters)))
+
+    items = []
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            items = list_bookmarks_postgres(conn, telegram_user_id=target_user_id, limit=limit)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            items = list_bookmarks_sqlite(conn, telegram_user_id=target_user_id, limit=limit)
+        finally:
+            conn.close()
+
+    if not items:
+        await msg.reply_text("해당 멤버의 책갈피가 아직 없어요.")
+        return
+
+    if settings.embeddings_provider != "openai" or not settings.openai_api_key:
+        await msg.reply_text("EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY 설정이 필요해요.")
+        return
+
+    texts = [b.text for b in items]
+    try:
+        embeddings = await asyncio.to_thread(
+            _get_openai_embeddings,
+            settings.openai_api_key,
+            settings.openai_embeddings_model,
+            texts,
+        )
+    except Exception:
+        logger.info("Failed to fetch embeddings for admin taste_member", exc_info=True)
+        await msg.reply_text("지금은 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    snapshot, _themes = _taste_snapshot_from_bookmarks(bookmarks=items, embeddings=embeddings, max_clusters=max_clusters)
+    await msg.reply_text("운영진용 멤버 취향 스냅샷\n\n" + snapshot)
 
 
 async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -655,6 +822,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("bookmark_edit", cmd_bookmark_edit))
     app.add_handler(CommandHandler("bookmark_delete", cmd_bookmark_delete))
     app.add_handler(CommandHandler("taste", cmd_taste))
+    app.add_handler(CommandHandler("taste_member", cmd_taste_member))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
