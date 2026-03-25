@@ -200,16 +200,21 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- 네. 버튼을 누르면 이번 주차 상태가 저장돼요.",
             "",
             "3) 문장 메모(책갈피)는 어떻게 하나요?",
-            "- 저장 예시1: /bookmark 페이지번호 | 여기 문장을 그대로 붙여넣기",
-            "  예) /bookmark 57 | 여기 문장을 그대로 붙여넣기",
-            "- 저장 예시2: /bookmark 여기 문장을 그대로 붙여넣기",
+            "- 저장 예시1: /bookmark 여기 문장을 그대로 붙여넣기",
+            "- 저장 예시2: /bookmark 페이지번호 | 여기 문장을 그대로 붙여넣기",
+            "  예) /bookmark 57 | 불가능해 보이는 것조차 실행하라",
+            "",
             "- 확인 예시: /bookmarks  (기본: 최근 10개)",
-            "- 더 많이 보기 예시: /bookmarks 숫자  (숫자만큼 최근 저장 내용 표시)",
+            "- 더 많이 보기 예시: /bookmarks 숫자  (숫자만큼 최근순으로 저장 내용 표시)",
             "  예) /bookmarks 20",
             "- 검색 예시: /bookmarks 용기",
-            "- 수정 예시: /bookmark_edit 12 페이지번호 | 수정할 문장",
-            "- 삭제 예시: /bookmark_delete 12",
-            "  (여기서 12는 /bookmarks 목록에 보이는 #id예요)",
+            "",
+            "- 수정 예시1: /bookmark_edit #id 수정할 문장",
+            "- 수정 예시2: /bookmark_edit #id 페이지번호 | 수정할 문장",
+            "  예) /bookmark_edit #3 57 | 불가능해 보이는 것조차 실행하라 - 마르쿠스 아우렐리우스"
+            "- 삭제 예시: /bookmark_delete #id",
+            "  예) /bookmark_delete #3",
+            "  (여기서 #3은 /bookmarks 목록 맨앞에 보이는 #id예요)",
             "",
             "4) 주의사항",
             "- 진도 체크 버튼은 '북클럽 단체방' 멤버만 사용할 수 있어요.",
@@ -390,36 +395,41 @@ async def cmd_bookmark_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if not context.args:
-        await msg.reply_text("사용법: /bookmark_edit <id> 120 | 새 문장\n또는: /bookmark_edit <id> 새 문장")
+        await msg.reply_text("사용법: /bookmark_edit #id 수정할 문장\n또는: /bookmark_edit #id 페이지번호 | 수정할 문장")
         return
 
-    if not context.args[0].isdigit():
-        await msg.reply_text("사용법: /bookmark_edit <id> 120 | 새 문장")
+    first = context.args[0].strip()
+    if not first.startswith("#") or not first[1:].isdigit():
+        await msg.reply_text("사용법: /bookmark_edit #id 페이지번호 | 수정할 문장\n예) /bookmark_edit #3 57 | 수정할 문장")
         return
 
-    bookmark_id = int(context.args[0])
-    rest = " ".join(context.args[1:]) if len(context.args) > 1 else ""
-    page, text = _parse_bookmark_args(rest)
+    bookmark_id = int(first[1:])
+    raw = " ".join(context.args[1:]) if len(context.args) > 1 else ""
+    page, text = _parse_bookmark_args(raw)
     if not text:
-        await msg.reply_text("수정할 문장을 입력해주세요. 예) /bookmark_edit 12 120 | 새 문장")
+        await msg.reply_text("수정할 문장을 입력해주세요. 예) /bookmark_edit #3 57 | 수정할 문장")
         return
 
     ok = False
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
-            ok = update_bookmark_postgres(conn, bookmark_id=bookmark_id, telegram_user_id=user.id, page=page, text=text)
+            ok = update_bookmark_postgres(
+                conn, bookmark_id=bookmark_id, telegram_user_id=user.id, page=page, text=text
+            )
         finally:
             conn.close()
     else:
         conn = connect_sqlite(settings.db_path)
         try:
-            ok = update_bookmark_sqlite(conn, bookmark_id=bookmark_id, telegram_user_id=user.id, page=page, text=text)
+            ok = update_bookmark_sqlite(
+                conn, bookmark_id=bookmark_id, telegram_user_id=user.id, page=page, text=text
+            )
         finally:
             conn.close()
 
     if not ok:
-        await msg.reply_text("해당 id의 책갈피를 찾지 못했어요. /bookmarks 로 id를 확인해주세요.")
+        await msg.reply_text("해당 #id의 책갈피를 찾지 못했어요. /bookmarks 로 확인해보세요.")
         return
 
     page_part = f"(p.{page}) " if page is not None else ""
@@ -438,11 +448,16 @@ async def cmd_bookmark_delete(update: Update, context: ContextTypes.DEFAULT_TYPE
     if msg is None or user is None:
         return
 
-    if not context.args or not context.args[0].isdigit():
-        await msg.reply_text("사용법: /bookmark_delete <id>")
+    if not context.args:
+        await msg.reply_text("사용법: /bookmark_delete #id\n예) /bookmark_delete #3")
         return
 
-    bookmark_id = int(context.args[0])
+    first = context.args[0].strip()
+    if not first.startswith("#") or not first[1:].isdigit():
+        await msg.reply_text("사용법: /bookmark_delete #id\n예) /bookmark_delete #3")
+        return
+
+    bookmark_id = int(first[1:])
     ok = False
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
@@ -458,7 +473,7 @@ async def cmd_bookmark_delete(update: Update, context: ContextTypes.DEFAULT_TYPE
             conn.close()
 
     if not ok:
-        await msg.reply_text("해당 id의 책갈피를 찾지 못했어요. /bookmarks 로 id를 확인해주세요.")
+        await msg.reply_text("해당 #id의 책갈피를 찾지 못했어요. /bookmarks 로 확인해보세요.")
         return
 
     await msg.reply_text(f"삭제했어요. #{bookmark_id}")
