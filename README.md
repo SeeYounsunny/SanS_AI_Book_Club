@@ -34,7 +34,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-`.env`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`를 채운 뒤 실행:
+`.env`에 `TELEGRAM_BOT_TOKEN`, `MEMBER_CHAT_ID`, `ADMIN_CHAT_ID`를 채운 뒤 실행:
 
 ```bash
 python -m app.main
@@ -57,6 +57,8 @@ python -m app.main
 - Railway에서 **Postgres 추가** 후 `DATABASE_URL`이 환경변수로 제공됩니다. 이 값이 있으면 SQLite 대신 **Postgres**를 사용합니다.
 - Railway 서비스 도메인이 생기면 `WEBHOOK_URL`에 그 **HTTPS 도메인**을 넣어주세요.
 - Railway에서 포트는 보통 플랫폼이 주입하는 값을 쓰는 게 안전합니다. 필요하면 `PORT`를 Railway의 포트 변수에 맞춰 설정하세요.
+- `MEMBER_CHAT_ID`: 북클럽 멤버 단체방 chat id
+- `ADMIN_CHAT_ID`: 운영진 방 chat id (운영 명령은 이 방 멤버만 실행 가능)
 
 ## Docker
 
