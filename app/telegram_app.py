@@ -472,11 +472,37 @@ async def cmd_bookmark_delete(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 def _extract_keywords(texts: List[str]) -> List[str]:
-    # Very lightweight keyword extraction (space-based).
-    # Works best when users include short keywords or phrases.
-    stop = {"그리고", "그런데", "하지만", "그래서", "이건", "저건", "그것", "이것", "저것", "저는", "나는", "내가", "너무"}
+    # Lightweight keyword extraction (space-based) with better Korean stopwords.
+    stop = {
+        "그리고",
+        "그런데",
+        "하지만",
+        "그래서",
+        "또",
+        "또는",
+        "이건",
+        "저건",
+        "그것",
+        "이것",
+        "저것",
+        "저는",
+        "나는",
+        "내가",
+        "너무",
+        "정말",
+        "그냥",
+        "진짜",
+        "약간",
+        "보이는",
+        "것",
+        "것조차",
+        "수",
+        "등",
+    }
     tokens: List[str] = []
     for t in texts:
+        # Drop author suffix like " - 마르쿠스 아우렐리우스"
+        t = t.split(" - ")[0]
         for raw in t.replace("\n", " ").split():
             w = raw.strip(".,!?\"'()[]{}:;~`")
             if len(w) < 2:
@@ -554,6 +580,24 @@ def _taste_snapshot_from_bookmarks(
     embeddings: List[List[float]],
     max_clusters: int,
 ) -> Tuple[str, List[str]]:
+    if len(bookmarks) <= 2:
+        # With too little data, don't pretend to infer themes.
+        reps = []
+        for b in bookmarks[:2]:
+            page_part = f"p.{b.page} " if b.page is not None else ""
+            reps.append(f"- {page_part}\"{b.text}\"")
+        header = "\n".join(
+            [
+                "내 독서 취향 스냅샷(임베딩 기반, 베타)",
+                f"- 분석 기준: 최근 {len(bookmarks)}개 책갈피",
+                "",
+                "아직 책갈피가 적어서 취향을 요약하기엔 데이터가 부족해요.",
+                "문장을 몇 개 더 저장하면 테마가 더 잘 잡혀요.",
+                "",
+            ]
+        )
+        return header + "\n".join(reps), []
+
     texts = [b.text for b in bookmarks]
     clusters = _cluster_embeddings(embeddings, threshold=0.82)[:max_clusters]
 
