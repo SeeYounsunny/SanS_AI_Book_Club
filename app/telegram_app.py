@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
+from datetime import datetime
 from typing import List, Optional, Tuple
+
+import httpx
 
 from openai import OpenAI
 from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
@@ -178,7 +181,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 MEMBER_CHAT_ID/ADMIN_CHAT_ID 설정용)",
             "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
             "- /set_book: 현재 책 제목 설정 (예: /set_book 아무도 미워하지 않는 자의 죽음)",
-            "- /show_book: 현재 책/일정 설정 확인",
+            "- /set_meeting: 모임 일정 설정 (예: /set_meeting 2026-04-10 또는 /set_meeting 2026-04-10 20:00)",
+            "- /book_search: 책 검색 (Google Books) (예: /book_search 아무도 미워하지 않는 자의 죽음)",
+            "- /book_select: 검색 결과 중 책 확정 (예: /book_select 1)",
+            "- /build_book_summary: 확정된 책 소개를 1~3줄로 요약(선택)",
+            "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
+            "- /set_pages: 총 페이지 수 수동 설정(보정) (예: /set_pages 320)",
+            "- /show_book: 현재 책/모임 일정 확인",
             "- /taste_member: 특정 멤버 취향 스냅샷 보기 (예: /taste_member @username 또는 /taste_member 123456789)",
             "- /club_taste: 북클럽 전체 취향 스냅샷(종합)",
             "- /taste_summary: (멤버 1:1) 취향 요약 1~3줄 (LLM)",
@@ -212,6 +221,10 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "진도 체크",
             "- 북클럽 단체방에 올라오는 메시지에서 버튼(✅/🟡/🔴)을 눌러주세요.",
+            "",
+            "이번 책 정보",
+            "- /book",
+            "- /plan",
             "",
             "책갈피(문장 메모) — 1:1 대화에서만",
             "- 저장: /bookmark 인상 깊은 문장",
@@ -250,6 +263,381 @@ async def cmd_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
     )
     await msg.reply_text(text)
+
+
+def _clean_one_line(s: Optional[str]) -> str:
+    return " ".join((s or "").replace("\n", " ").split()).strip()
+
+
+def _truncate(s: str, *, max_len: int) -> str:
+    s = (s or "").strip()
+    if len(s) <= max_len:
+        return s
+    return s[: max(0, max_len - 1)].rstrip() + "…"
+
+
+def _extract_isbn(identifiers: Optional[list]) -> Optional[str]:
+    if not identifiers:
+        return None
+    # Prefer ISBN_13, then ISBN_10
+    isbn13 = None
+    isbn10 = None
+    for it in identifiers:
+        t = (it or {}).get("type")
+        v = (it or {}).get("identifier")
+        if not v:
+            continue
+        if t == "ISBN_13":
+            isbn13 = v
+        elif t == "ISBN_10":
+            isbn10 = v
+    return isbn13 or isbn10
+
+
+async def _google_books_search(*, query: str, api_key: Optional[str], max_results: int = 5) -> list[dict]:
+    q = (query or "").strip()
+    if not q:
+        return []
+    params = {
+        "q": q,
+        "maxResults": str(max(1, min(10, int(max_results)))),
+        "printType": "books",
+        "orderBy": "relevance",
+    }
+    if api_key:
+        params["key"] = api_key
+    url = "https://www.googleapis.com/books/v1/volumes"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+    items = data.get("items") or []
+    results: list[dict] = []
+    for it in items:
+        vi = (it or {}).get("volumeInfo") or {}
+        title = _clean_one_line(vi.get("title"))
+        authors = vi.get("authors") or []
+        publisher = _clean_one_line(vi.get("publisher"))
+        published = _clean_one_line(vi.get("publishedDate"))
+        page_count = vi.get("pageCount")
+        description = _clean_one_line(vi.get("description"))
+        info_link = _clean_one_line(vi.get("infoLink"))
+        isbn = _extract_isbn(vi.get("industryIdentifiers"))
+        if not title:
+            continue
+        results.append(
+            {
+                "title": title,
+                "authors": authors,
+                "publisher": publisher,
+                "published": published,
+                "page_count": int(page_count) if isinstance(page_count, int) else None,
+                "description": description,
+                "info_link": info_link,
+                "isbn": isbn,
+            }
+        )
+    return results
+
+
+def _format_book_candidate_line(idx: int, b: dict) -> str:
+    authors = ", ".join(b.get("authors") or []) or "저자 미상"
+    pages = b.get("page_count")
+    pages_part = f"{pages}p" if pages else "?p"
+    pub = b.get("publisher") or ""
+    pub_date = b.get("published") or ""
+    meta = " / ".join([p for p in [pages_part, pub, pub_date] if p]).strip()
+    if meta:
+        meta = f" ({meta})"
+    return f"{idx}) {b.get('title')} — {authors}{meta}"
+
+
+async def cmd_book_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    query = " ".join(context.args).strip() if context.args else ""
+    if not query:
+        await msg.reply_text("사용법: /book_search <책 제목 | 저자 | ISBN>")
+        return
+
+    try:
+        results = await _google_books_search(query=query, api_key=settings.google_books_api_key, max_results=5)
+    except Exception:
+        logger.info("book_search failed", exc_info=True)
+        await msg.reply_text("지금은 책 검색을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    if not results:
+        await msg.reply_text("검색 결과가 없어요. 다른 키워드로 다시 시도해줘요.")
+        return
+
+    context.user_data["book_search_results"] = results
+    lines = ["책 검색 결과 (Google Books)", ""]
+    for i, b in enumerate(results, start=1):
+        lines.append(_format_book_candidate_line(i, b))
+    lines.extend(["", "확정: /book_select <번호>  (예: /book_select 1)"])
+    await msg.reply_text("\n".join(lines))
+
+
+async def cmd_book_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    if not context.args or not context.args[0].isdigit():
+        await msg.reply_text("사용법: /book_select <번호>\n먼저 /book_search 로 검색해줘요.")
+        return
+
+    results = context.user_data.get("book_search_results") or []
+    if not isinstance(results, list) or not results:
+        await msg.reply_text("선택할 검색 결과가 없어요. 먼저 /book_search 를 실행해줘요.")
+        return
+
+    idx = int(context.args[0])
+    if idx < 1 or idx > len(results):
+        await msg.reply_text(f"번호가 범위를 벗어났어요. 1~{len(results)} 중에서 골라줘요.")
+        return
+
+    b = results[idx - 1]
+    title = (b.get("title") or "").strip()
+    authors = ", ".join(b.get("authors") or []) or ""
+    isbn = (b.get("isbn") or "").strip()
+    pages = b.get("page_count")
+    published = (b.get("published") or "").strip()
+    publisher = (b.get("publisher") or "").strip()
+    description = (b.get("description") or "").strip()
+    info_link = (b.get("info_link") or "").strip()
+
+    def _set(key: str, value: Optional[str]) -> None:
+        if not value:
+            return
+        if is_postgres_url(settings.database_url):
+            conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+            try:
+                set_setting_postgres(conn, key=key, value=value)
+            finally:
+                conn.close()
+        else:
+            conn = connect_sqlite(settings.db_path)
+            try:
+                set_setting_sqlite(conn, key=key, value=value)
+            finally:
+                conn.close()
+
+    # Persist: book_title is used elsewhere (taste_summary prompt)
+    _set("book_title", title)
+    _set("book_authors", authors)
+    _set("book_isbn", isbn)
+    _set("book_published", published)
+    _set("book_publisher", publisher)
+    _set("book_info_link", info_link)
+    if isinstance(pages, int):
+        _set("book_page_count", str(pages))
+    if description:
+        _set("book_description", description)
+
+    context.user_data.pop("book_search_results", None)
+    await msg.reply_text(
+        "\n".join(
+            [
+                "책을 확정했어요.",
+                f"- 제목: {title}",
+                f"- 저자: {authors or '(미상)'}",
+                f"- 페이지: {str(pages) + 'p' if isinstance(pages, int) else '(미상)'}",
+                f"- ISBN: {isbn or '(미상)'}",
+            ]
+        )
+    )
+
+
+def _load_club_book_info(settings: Settings) -> dict:
+    def _get(key: str) -> Optional[str]:
+        if is_postgres_url(settings.database_url):
+            conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+            try:
+                return get_setting_postgres(conn, key=key)
+            finally:
+                conn.close()
+        conn = connect_sqlite(settings.db_path)
+        try:
+            return get_setting_sqlite(conn, key=key)
+        finally:
+            conn.close()
+
+    return {
+        "title": _get("book_title"),
+        "authors": _get("book_authors"),
+        "isbn": _get("book_isbn"),
+        "page_count": _get("book_page_count"),
+        "published": _get("book_published"),
+        "publisher": _get("book_publisher"),
+        "info_link": _get("book_info_link"),
+        "description": _get("book_description"),
+        "summary": _get("book_summary"),
+        "meeting_at": _get("meeting_at"),
+    }
+
+
+def _format_book_info_message(info: dict, *, include_description: bool = True) -> str:
+    title = info.get("title") or "(미설정)"
+    authors = info.get("authors") or "(미상)"
+    meeting_at = info.get("meeting_at") or "(미설정)"
+    page_count = info.get("page_count") or "(미상)"
+    isbn = info.get("isbn") or ""
+    published = info.get("published") or ""
+    publisher = info.get("publisher") or ""
+    info_link = info.get("info_link") or ""
+    description = info.get("description") or ""
+    summary = info.get("summary") or ""
+
+    meta_parts = [p for p in [publisher, published] if p]
+    meta = " / ".join(meta_parts).strip()
+
+    lines = [
+        "이번 모임 책 정보",
+        "",
+        f"- 제목: {title}",
+        f"- 저자: {authors}",
+        f"- 총 페이지: {page_count}",
+        f"- 모임 일정: {meeting_at}",
+    ]
+    if meta:
+        lines.append(f"- 출판 정보: {meta}")
+    if isbn:
+        lines.append(f"- ISBN: {isbn}")
+    if info_link:
+        lines.append(f"- 링크: {info_link}")
+    if summary:
+        lines.extend(["", "요약", summary])
+    elif include_description and description:
+        lines.extend(["", "소개", _truncate(description, max_len=700)])
+    return "\n".join(lines)
+
+
+def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: str, description: str) -> str:
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "너는 온라인 북클럽 운영진의 카피라이터야. 목표는 '멤버가 당장 읽고 싶어지게' 만드는 것이다. "
+                    "책 소개문을 바탕으로 멤버 단체방에 보낼 2~3줄 임팩트 메시지를 한국어로 쓴다."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"책 제목: {title}\n"
+                    f"저자: {authors}\n\n"
+                    f"책 소개(원문):\n{description}\n\n"
+                    "요청:\n"
+                    "- 한국어로 2~3줄(줄바꿈 포함)\n"
+                    "- 질문 금지\n"
+                    "- 과장 금지(허위/과대 금지), 단정적 평가 금지\n"
+                    "- '어떤 책인지'가 3초 안에 감 오게\n"
+                    "- 핵심 매력 포인트 2개 + 마지막에 짧은 독려 1줄\n"
+                    "- 불릿/번호/이모지 금지\n"
+                ),
+            },
+        ],
+        temperature=0.7,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    if not settings.openai_api_key:
+        await msg.reply_text("이 기능을 사용하려면 운영진이 OPENAI_API_KEY를 설정해야 해요.")
+        return
+
+    info = _load_club_book_info(settings)
+    title = (info.get("title") or "").strip()
+    authors = (info.get("authors") or "").strip() or "미상"
+    description = (info.get("description") or "").strip()
+    if not title or title == "(미설정)":
+        await msg.reply_text("먼저 /set_book 또는 /book_select 로 책을 확정해줘요.")
+        return
+    if not description:
+        await msg.reply_text("책 소개(description)가 없어서 요약을 만들 수 없어요. (다른 검색 결과를 선택해보세요.)")
+        return
+
+    try:
+        summary = await asyncio.to_thread(
+            _get_openai_book_summary,
+            settings.openai_api_key,
+            settings.openai_summary_model,
+            title=title,
+            authors=authors,
+            description=description,
+        )
+    except Exception:
+        logger.info("Failed to build book summary", exc_info=True)
+        await msg.reply_text("지금은 책 요약을 만들지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    if not summary:
+        await msg.reply_text("요약 결과가 비어있어요. 잠시 후 다시 시도해줘요.")
+        return
+    # Soft-enforce 2~3 lines
+    lines = [ln.strip() for ln in summary.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        # If model returned 1 line, keep it but add a gentle second line.
+        lines = [lines[0] if lines else summary.strip(), "이번 주, 첫 페이지부터 같이 시작해요."]
+    lines = lines[:3]
+    summary = "\n".join(lines)
+
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            set_setting_postgres(conn, key="book_summary", value=summary)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            set_setting_sqlite(conn, key="book_summary", value=summary)
+        finally:
+            conn.close()
+
+    await msg.reply_text("책 요약을 저장했어요.\n\n" + summary)
+
+
+async def cmd_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_member_or_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    info = _load_club_book_info(settings)
+    await msg.reply_text(_format_book_info_message(info))
+
+
+async def cmd_send_book_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    info = _load_club_book_info(settings)
+    text = _format_book_info_message(info)
+    await context.bot.send_message(chat_id=settings.member_chat_id, text=text)
+    await msg.reply_text("멤버 단체방에 책 정보를 전송했어요.")
 
 
 def _parse_bookmark_args(arg_text: str) -> tuple[Optional[int], str]:
@@ -922,6 +1310,60 @@ async def cmd_set_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             conn.close()
     await msg.reply_text(f"현재 책을 설정했어요: {title}")
 
+def _parse_meeting_args(args: List[str]) -> Optional[str]:
+    """
+    Accepts:
+    - YYYY-MM-DD
+    - YYYY-MM-DD HH:MM
+    Returns a normalized string stored in DB (local-time string).
+    """
+    if not args:
+        return None
+    if len(args) == 1:
+        raw = args[0].strip()
+        try:
+            dt = datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError:
+            return None
+        return dt.strftime("%Y-%m-%d")
+    if len(args) >= 2:
+        raw = (args[0].strip() + " " + args[1].strip()).strip()
+        try:
+            dt = datetime.strptime(raw, "%Y-%m-%d %H:%M")
+        except ValueError:
+            return None
+        return dt.strftime("%Y-%m-%d %H:%M")
+    return None
+
+
+async def cmd_set_meeting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+
+    meeting_at = _parse_meeting_args(context.args or [])
+    if not meeting_at:
+        await msg.reply_text("사용법: /set_meeting 2026-04-10\n또는: /set_meeting 2026-04-10 20:00")
+        return
+
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            set_setting_postgres(conn, key="meeting_at", value=meeting_at)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            set_setting_sqlite(conn, key="meeting_at", value=meeting_at)
+        finally:
+            conn.close()
+
+    await msg.reply_text(f"모임 일정을 설정했어요: {meeting_at}")
+
 
 async def cmd_show_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
@@ -931,19 +1373,141 @@ async def cmd_show_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if msg is None:
         return
     title = None
+    meeting_at = None
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
             title = get_setting_postgres(conn, key="book_title")
+            meeting_at = get_setting_postgres(conn, key="meeting_at")
         finally:
             conn.close()
     else:
         conn = connect_sqlite(settings.db_path)
         try:
             title = get_setting_sqlite(conn, key="book_title")
+            meeting_at = get_setting_sqlite(conn, key="meeting_at")
         finally:
             conn.close()
-    await msg.reply_text(f"현재 책: {title or '(미설정)'}")
+    await msg.reply_text(
+        "\n".join(
+            [
+                f"현재 책: {title or '(미설정)'}",
+                f"모임 일정: {meeting_at or '(미설정)'}",
+            ]
+        )
+    )
+
+
+async def cmd_set_pages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    if not context.args or not context.args[0].isdigit():
+        await msg.reply_text("사용법: /set_pages <총페이지>\n예) /set_pages 320")
+        return
+    pages = int(context.args[0])
+    if pages <= 0 or pages > 5000:
+        await msg.reply_text("총 페이지 수가 올바르지 않아요. (1~5000)")
+        return
+
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            set_setting_postgres(conn, key="book_page_count", value=str(pages))
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            set_setting_sqlite(conn, key="book_page_count", value=str(pages))
+        finally:
+            conn.close()
+    await msg.reply_text(f"총 페이지를 설정했어요: {pages}p")
+
+
+def _parse_meeting_date_for_plan(meeting_at: str) -> Optional[datetime]:
+    raw = (meeting_at or "").strip()
+    if not raw:
+        return None
+    # stored formats: YYYY-MM-DD or YYYY-MM-DD HH:MM
+    try:
+        if len(raw) == 10:
+            return datetime.strptime(raw, "%Y-%m-%d")
+        return datetime.strptime(raw, "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+
+
+async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Member-facing plan (allowed for members/admins, but safe in group too)
+    if not await _require_member_or_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+
+    info = _load_club_book_info(settings)
+    title = info.get("title") or "(미설정)"
+    meeting_at = info.get("meeting_at") or ""
+    page_count_raw = info.get("page_count") or ""
+
+    meeting_dt = _parse_meeting_date_for_plan(meeting_at)
+    if meeting_dt is None:
+        await msg.reply_text("모임 일정이 아직 없어요. 운영진이 /set_meeting 으로 먼저 설정해줘요.")
+        return
+    if not page_count_raw.isdigit():
+        await msg.reply_text("총 페이지 수가 아직 없어요. 운영진이 /set_pages 로 먼저 설정해줘요.")
+        return
+    total_pages = int(page_count_raw)
+    if total_pages <= 0:
+        await msg.reply_text("총 페이지 수가 올바르지 않아요. 운영진이 /set_pages 를 다시 설정해줘요.")
+        return
+
+    # Defaults (later we can make these configurable)
+    buffer_days = 2
+    # Plan from today
+    today = datetime.now().date()
+    meeting_date = meeting_dt.date()
+    days_total = (meeting_date - today).days
+    if days_total <= 0:
+        await msg.reply_text("모임 날짜가 오늘이거나 이미 지났어요. 일정 설정을 확인해줘요.")
+        return
+    days_readable = max(1, days_total - buffer_days)
+    pages_to_read = total_pages
+    ppd = (pages_to_read + days_readable - 1) // days_readable  # ceil
+    ppd = max(5, ppd)
+
+    # Build up to 14 lines; beyond that show first/last and summary
+    lines: List[str] = []
+    cur = 1
+    for d in range(days_readable):
+        start = cur
+        end = min(total_pages, start + ppd - 1)
+        day = today.toordinal() + d
+        date_str = datetime.fromordinal(day).strftime("%m/%d")
+        lines.append(f"{date_str}: p.{start}–{end}")
+        cur = end + 1
+        if cur > total_pages:
+            break
+    # If pages remain (due to caps), append note
+    if cur <= total_pages:
+        lines.append(f"(남은 페이지 p.{cur}–{total_pages}는 중간에 더 읽어야 해요.)")
+
+    header = "\n".join(
+        [
+            f"읽기 계획표 — {title}",
+            f"- 모임까지 D-{days_total} (여유 {buffer_days}일 포함)",
+            f"- 총 {total_pages}p / 읽는날 {days_readable}일 / 하루 약 {ppd}p",
+            "",
+        ]
+    )
+    plan_body = "\n".join(lines)
+    footer = "\n\n" + "여유일은 밀린 분량 정리/복습용으로 비워뒀어요."
+    await msg.reply_text(header + plan_body + footer)
 
 
 async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1224,11 +1788,19 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("taste", cmd_taste))
     app.add_handler(CommandHandler("taste_summary", cmd_taste_summary))
     app.add_handler(CommandHandler("set_book", cmd_set_book))
+    app.add_handler(CommandHandler("set_meeting", cmd_set_meeting))
+    app.add_handler(CommandHandler("set_pages", cmd_set_pages))
     app.add_handler(CommandHandler("show_book", cmd_show_book))
     app.add_handler(CommandHandler("taste_member", cmd_taste_member))
     app.add_handler(CommandHandler("club_taste", cmd_club_taste))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
+    app.add_handler(CommandHandler("book_search", cmd_book_search))
+    app.add_handler(CommandHandler("book_select", cmd_book_select))
+    app.add_handler(CommandHandler("build_book_summary", cmd_build_book_summary))
+    app.add_handler(CommandHandler("send_book_info", cmd_send_book_info))
+    app.add_handler(CommandHandler("book", cmd_book))
+    app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
 
     return app

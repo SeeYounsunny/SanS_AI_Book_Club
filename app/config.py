@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     port: int = Field(default=8080, alias="PORT")
     webhook_secret_token: Optional[str] = Field(default=None, alias="WEBHOOK_SECRET_TOKEN")
 
+    # External book metadata
+    # Optional: used for /book_search and /book_select
+    google_books_api_key: Optional[str] = Field(default=None, alias="GOOGLE_BOOKS_API_KEY")
+
 
 def get_settings() -> Settings:
     return Settings()
