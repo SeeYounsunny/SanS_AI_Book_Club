@@ -19,6 +19,7 @@ logging.basicConfig(
 
 async def _run(app: Application) -> None:
     settings = app.bot_data["settings"]
+    logger = logging.getLogger(__name__)
 
     await app.initialize()
     await app.start()
@@ -45,9 +46,14 @@ async def _run(app: Application) -> None:
         if expected:
             provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
             if provided != expected:
+                logger.warning("Unauthorized webhook request: secret token mismatch")
                 return web.Response(status=401, text="unauthorized")
 
-        data = await request.json()
+        try:
+            data = await request.json()
+        except Exception:
+            logger.warning("Invalid webhook JSON body", exc_info=True)
+            return web.Response(status=400, text="invalid json")
         update = Update.de_json(data, app.bot)
         await app.process_update(update)
         return web.json_response({"ok": True})
@@ -72,11 +78,11 @@ async def _run(app: Application) -> None:
                     url=url,
                     secret_token=settings.webhook_secret_token or None,
                 )
-                logging.getLogger(__name__).info("Webhook set to %s", url)
+                logger.info("Webhook set to %s", url)
                 return
             except Exception as e:
                 wait_s = min(30, 2 * attempt)
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "Failed to set webhook (attempt %s): %s. Retrying in %ss",
                     attempt,
                     str(e),
