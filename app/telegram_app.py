@@ -563,7 +563,10 @@ def _get_openai_embeddings(api_key: str, model: str, texts: List[str]) -> List[L
     resp = client.embeddings.create(model=model, input=texts)
     # Ensure stable order by index
     data = sorted(resp.data, key=lambda d: d.index)
-    return [d.embedding for d in data]
+    vectors = [d.embedding for d in data]
+    if len(vectors) != len(texts):
+        raise TypeError(f"embeddings length mismatch: got {len(vectors)} for {len(texts)} texts")
+    return vectors
 
 
 def _taste_snapshot_from_bookmarks(
@@ -676,7 +679,15 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text(f"지금은 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
         return
 
-    snapshot, _themes = _taste_snapshot_from_bookmarks(bookmarks=items, embeddings=embeddings, max_clusters=max_clusters)
+    try:
+        snapshot, _themes = _taste_snapshot_from_bookmarks(
+            bookmarks=items, embeddings=embeddings, max_clusters=max_clusters
+        )
+    except Exception as e:
+        logger.info("Failed to build taste snapshot", exc_info=True)
+        await msg.reply_text(f"취향 스냅샷 생성에 실패했어요. ({e.__class__.__name__}: {str(e)[:120]})")
+        return
+
     await msg.reply_text(snapshot)
 
 
@@ -776,7 +787,15 @@ async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await msg.reply_text(f"지금은 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
         return
 
-    snapshot, _themes = _taste_snapshot_from_bookmarks(bookmarks=items, embeddings=embeddings, max_clusters=max_clusters)
+    try:
+        snapshot, _themes = _taste_snapshot_from_bookmarks(
+            bookmarks=items, embeddings=embeddings, max_clusters=max_clusters
+        )
+    except Exception as e:
+        logger.info("Failed to build taste_member snapshot", exc_info=True)
+        await msg.reply_text(f"취향 스냅샷 생성에 실패했어요. ({e.__class__.__name__}: {str(e)[:120]})")
+        return
+
     await msg.reply_text(f"운영진용 멤버 취향 스냅샷 ({target_label})\n\n" + snapshot)
 
 
@@ -827,7 +846,15 @@ async def cmd_club_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await msg.reply_text("지금은 북클럽 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
         return
 
-    snapshot, _themes = _taste_snapshot_from_bookmarks(bookmarks=items, embeddings=embeddings, max_clusters=max_clusters)
+    try:
+        snapshot, _themes = _taste_snapshot_from_bookmarks(
+            bookmarks=items, embeddings=embeddings, max_clusters=max_clusters
+        )
+    except Exception as e:
+        logger.info("Failed to build club_taste snapshot", exc_info=True)
+        await msg.reply_text(f"북클럽 취향 스냅샷 생성에 실패했어요. ({e.__class__.__name__}: {str(e)[:120]})")
+        return
+
     await msg.reply_text("북클럽 전체 취향 스냅샷(종합)\n\n" + snapshot)
 
 
