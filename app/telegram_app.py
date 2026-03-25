@@ -75,6 +75,17 @@ async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return False
 
 
+async def _require_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    settings: Settings = context.application.bot_data["settings"]
+    msg = update.effective_message
+    ok = await _is_member_of(settings.member_chat_id, update, context)
+    if ok:
+        return True
+    if msg is not None:
+        await msg.reply_text("이 명령은 북클럽 멤버만 사용할 수 있어요.")
+    return False
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
         return
@@ -116,7 +127,7 @@ async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await msg.reply_text("\n".join(lines))
 
 
-async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
         return
     msg = update.effective_message
@@ -137,6 +148,38 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "2) 그룹에서 /chatid 로 chat_id 복사",
             "3) Railway Variables에 MEMBER_CHAT_ID/ADMIN_CHAT_ID로 저장",
             "4) 운영진 방에서 /send_weekly_check 실행",
+        ]
+    )
+
+    await msg.reply_text(text)
+
+
+async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Member-facing usage guide. Keep this usable in the member group only.
+    if not await _require_member(update, context):
+        return
+
+    msg = update.effective_message
+    if msg is None:
+        return
+
+    text = "\n".join(
+        [
+            "북클럽 봇 사용 방법",
+            "",
+            "### 1) 진도 체크는 어떻게 하나요?",
+            "- 북클럽 단체방에 '이번주 읽기 범위' 메시지가 올라오면",
+            "- 아래 버튼 중 하나를 눌러주세요:",
+            "  - ✅ 완료 / 🟡 부분 / 🔴 아직",
+            "",
+            "### 2) 내가 누른 기록은 저장되나요?",
+            "- 네. 버튼을 누르면 이번 주차 상태가 저장돼요.",
+            "",
+            "### 3) 주의사항",
+            "- 진도 체크 버튼은 '북클럽 단체방' 멤버만 사용할 수 있어요.",
+            "- 운영진용 명령(/help 등)은 멤버에게는 보이지 않아요.",
+            "",
+            "추가 기능(퀴즈/토론 질문/리포트 등)이 생기면 이 안내를 업데이트할게요.",
         ]
     )
 
@@ -244,6 +287,7 @@ def build_application(settings: Settings) -> Application:
             sqlite_conn.close()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("guide", cmd_guide))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
