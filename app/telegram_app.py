@@ -207,7 +207,7 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- 더 많이 보기 예시: /bookmarks 숫자  (숫자만큼 최근 저장 내용 표시)",
             "  예) /bookmarks 20",
             "- 검색 예시: /bookmarks 용기",
-            "- 수정 예시: /bookmark_edit 12 페이지번호 | 수정한 문장",
+            "- 수정 예시: /bookmark_edit 12 페이지번호 | 수정할 문장",
             "- 삭제 예시: /bookmark_delete 12",
             "  (여기서 12는 /bookmarks 목록에 보이는 #id예요)",
             "",
