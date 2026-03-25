@@ -17,14 +17,15 @@ logging.basicConfig(
 )
 
 
-async def _run_webhook(app: Application) -> None:
+async def _run(app: Application) -> None:
     settings = app.bot_data["settings"]
 
     await app.initialize()
-    await app.bot.set_webhook(
-        url=f"{settings.webhook_url.rstrip('/')}/telegram/webhook",
-        secret_token=settings.webhook_secret_token or None,
-    )
+    if settings.webhook_url:
+        await app.bot.set_webhook(
+            url=f"{settings.webhook_url.rstrip('/')}/telegram/webhook",
+            secret_token=settings.webhook_secret_token or None,
+        )
 
     await app.start()
 
@@ -32,6 +33,9 @@ async def _run_webhook(app: Application) -> None:
         return web.json_response({"ok": True})
 
     async def telegram_webhook(request: web.Request) -> web.Response:
+        if not settings.webhook_url:
+            return web.Response(status=400, text="WEBHOOK_URL not configured")
+
         # Optional verification: Telegram sends X-Telegram-Bot-Api-Secret-Token if configured.
         expected = settings.webhook_secret_token
         if expected:
@@ -54,29 +58,29 @@ async def _run_webhook(app: Application) -> None:
     site = web.TCPSite(runner, host="0.0.0.0", port=settings.port)
     await site.start()
 
+    polling_queue = None
+    if not settings.webhook_url:
+        polling_queue = await app.updater.start_polling(
+            allowed_updates=["message", "callback_query"],
+        )
+
     # Run forever until cancelled / terminated
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
+        if polling_queue is not None:
+            await app.updater.stop()
         await runner.cleanup()
         await app.stop()
         await app.shutdown()
-
-
-def _run_polling(app: Application) -> None:
-    # Fallback for local testing only.
-    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 def main() -> None:
     settings = get_settings()
     app = build_application(settings)
 
-    if settings.webhook_url:
-        asyncio.run(_run_webhook(app))
-    else:
-        _run_polling(app)
+    asyncio.run(_run(app))
 
 
 if __name__ == "__main__":
