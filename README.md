@@ -7,7 +7,13 @@
 - 멤버 단체방에 “진도 체크” 메시지 전송 (버튼: 완료/부분/아직)
 - 멤버 1:1 채팅에서 책갈피(북마크) 저장/조회/수정/삭제
 - 북마크 기반 취향 스냅샷(`/taste`) + 1~3줄 취향 요약(`/taste_summary`)
-- 운영진용: 현재 책 제목 설정/조회(`/set_book`, `/show_book`), 멤버/클럽 취향 보기(`/taste_member`, `/club_taste`)
+- 운영진용: **월별(YYYY-MM) 책/모임 관리** + 멤버/클럽 취향 보기(`/taste_member`, `/club_taste`)
+
+## 월별(이달의 책) 구조
+
+- 책/모임 정보는 **월(YYYY-MM) 단위로 저장**됩니다.
+- 운영진은 `/set_month 2026-04`로 “이번에 설정할 월”을 지정한 뒤 책/일정/페이지를 설정합니다.
+- 멤버는 `/book`으로 **이번 달 책**, `/book_month 2026-04`로 **특정 월의 책**을 확인할 수 있어요.
 
 ## Chat 구조 (중요)
 
@@ -17,6 +23,11 @@
 - 멤버 명령 중 북마크/취향 기능은 **멤버 1:1(private) 채팅에서만** 동작
 
 chat id 확인은 운영진 전용 `/chatid`를 사용하세요.
+
+## 주요 명령어(요약)
+
+- 멤버: `/book`, `/book_month YYYY-MM`, `/plan`, (1:1) `/bookmark`, `/bookmarks`, `/taste_summary`
+- 운영진: `/set_month YYYY-MM`, `/book_search`, `/book_select`, `/build_book_summary`, `/send_book_info`, `/set_meeting`, `/set_pages`, `/show_book`
 
 ## Requirements
 
@@ -83,6 +94,7 @@ python -m app.main
 - `OPENAI_API_KEY`
 - `OPENAI_EMBEDDINGS_MODEL` (기본: `text-embedding-3-small`)
 - `OPENAI_SUMMARY_MODEL` (기본: `gpt-4o-mini`)
+- (선택) `GOOGLE_BOOKS_API_KEY` (책 검색 안정성/쿼터 개선)
 
 ## Docker
 
