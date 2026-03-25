@@ -70,6 +70,15 @@ def init_db_sqlite(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS club_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at_iso TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -101,7 +110,63 @@ def init_db_postgres(conn: psycopg.Connection) -> None:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS club_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at_iso TEXT NOT NULL
+            )
+            """
+        )
     conn.commit()
+
+
+def set_setting_sqlite(conn: sqlite3.Connection, *, key: str, value: str, now: Optional[datetime] = None) -> None:
+    if now is None:
+        now = datetime.utcnow()
+    updated_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+    conn.execute(
+        """
+        INSERT INTO club_settings(key, value, updated_at_iso)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at_iso=excluded.updated_at_iso
+        """,
+        (key, value, updated_at_iso),
+    )
+    conn.commit()
+
+
+def get_setting_sqlite(conn: sqlite3.Connection, *, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM club_settings WHERE key = ? LIMIT 1", (key,)).fetchone()
+    if row is None:
+        return None
+    return str(row["value"])
+
+
+def set_setting_postgres(conn: psycopg.Connection, *, key: str, value: str, now: Optional[datetime] = None) -> None:
+    if now is None:
+        now = datetime.utcnow()
+    updated_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO club_settings(key, value, updated_at_iso)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at_iso = EXCLUDED.updated_at_iso
+            """,
+            (key, value, updated_at_iso),
+        )
+    conn.commit()
+
+
+def get_setting_postgres(conn: psycopg.Connection, *, key: str) -> Optional[str]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM club_settings WHERE key = %s LIMIT 1", (key,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return str(row[0])
 
 
 def init_db(conn: sqlite3.Connection) -> None:

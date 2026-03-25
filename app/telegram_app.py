@@ -35,12 +35,16 @@ from app.db import (
     insert_progress_event,
     insert_progress_event_postgres,
     is_postgres_url,
+    get_setting_postgres,
+    get_setting_sqlite,
     list_bookmarks_postgres,
     list_bookmarks_sqlite,
     list_recent_bookmarks_all_postgres,
     list_recent_bookmarks_all_sqlite,
     update_bookmark_postgres,
     update_bookmark_sqlite,
+    set_setting_postgres,
+    set_setting_sqlite,
 )
 from app.reading_check import WeeklyCheckConfig, build_weekly_check_message
 
@@ -173,6 +177,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 MEMBER_CHAT_ID/ADMIN_CHAT_ID 설정용)",
             "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
+            "- /set_book: 현재 책 제목 설정 (예: /set_book 아무도 미워하지 않는 자의 죽음)",
+            "- /show_book: 현재 책/일정 설정 확인",
             "- /taste_member: 특정 멤버 취향 스냅샷 보기 (예: /taste_member @username 또는 /taste_member 123456789)",
             "- /club_taste: 북클럽 전체 취향 스냅샷(종합)",
             "- /taste_summary: (멤버 1:1) 취향 요약 1~3줄 (LLM)",
@@ -215,6 +221,7 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "취향 스냅샷 — 1:1 대화에서만",
             "- /taste",
+            "- /taste_summary",
         ]
     )
 
@@ -830,6 +837,24 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     reps = _select_representative_bookmarks(items, embeddings, max_clusters=max_clusters, max_quotes=max_quotes)
     prompt = _build_taste_summary_prompt(reps)
+
+    # Include current book title (if configured) to ground the summary.
+    book_title = None
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            book_title = get_setting_postgres(conn, key="book_title")
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            book_title = get_setting_sqlite(conn, key="book_title")
+        finally:
+            conn.close()
+    if book_title:
+        prompt = f"[현재 읽는 책: {book_title}]\n" + prompt
+
     try:
         summary = await asyncio.to_thread(
             _get_openai_taste_summary,
@@ -861,7 +886,64 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Ensure 1~3 lines (soft cap)
     lines = [ln.strip() for ln in summary.splitlines() if ln.strip()]
-    await msg.reply_text("\n".join(lines[:3]))
+    lines = lines[:3]
+    encouragement = "오늘은 10분만 읽고 책갈피 하나 남겨봐요."
+    if not lines:
+        lines = [encouragement]
+    elif len(lines) < 3:
+        lines.append(encouragement)
+    else:
+        lines[-1] = f"{lines[-1]} {encouragement}"
+    await msg.reply_text("\n".join(lines))
+
+
+async def cmd_set_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    title = " ".join(context.args).strip() if context.args else ""
+    if not title:
+        await msg.reply_text("사용법: /set_book <책 제목>")
+        return
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            set_setting_postgres(conn, key="book_title", value=title)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            set_setting_sqlite(conn, key="book_title", value=title)
+        finally:
+            conn.close()
+    await msg.reply_text(f"현재 책을 설정했어요: {title}")
+
+
+async def cmd_show_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    title = None
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            title = get_setting_postgres(conn, key="book_title")
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            title = get_setting_sqlite(conn, key="book_title")
+        finally:
+            conn.close()
+    await msg.reply_text(f"현재 책: {title or '(미설정)'}")
 
 
 async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1141,6 +1223,8 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("bookmark_delete", cmd_bookmark_delete))
     app.add_handler(CommandHandler("taste", cmd_taste))
     app.add_handler(CommandHandler("taste_summary", cmd_taste_summary))
+    app.add_handler(CommandHandler("set_book", cmd_set_book))
+    app.add_handler(CommandHandler("show_book", cmd_show_book))
     app.add_handler(CommandHandler("taste_member", cmd_taste_member))
     app.add_handler(CommandHandler("club_taste", cmd_club_taste))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
