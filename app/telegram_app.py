@@ -6,6 +6,7 @@ from collections import Counter
 from typing import List, Optional, Tuple
 
 from openai import OpenAI
+from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
 
 from telegram import ChatMember, Update
 from telegram.error import TelegramError
@@ -615,8 +616,8 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if msg is None or user is None:
         return
 
-    limit = max(10, min(100, int(settings.taste_bookmarks_limit)))
-    max_clusters = max(2, min(8, int(settings.taste_max_clusters)))
+    limit = max(1, min(100, int(settings.taste_bookmarks_limit)))
+    max_clusters = max(1, min(8, int(settings.taste_max_clusters)))
 
     items = []
     if is_postgres_url(settings.database_url):
@@ -643,6 +644,12 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Fetch embeddings in a thread to avoid blocking the event loop.
+    # Ensure we don't send empty strings
+    items = [b for b in items if (b.text or "").strip()]
+    if not items:
+        await msg.reply_text("분석할 수 있는 책갈피 문장이 없어요. /bookmark 로 문장을 저장해보세요.")
+        return
+
     texts = [b.text for b in items]
     try:
         embeddings = await asyncio.to_thread(
@@ -651,9 +658,22 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             settings.openai_embeddings_model,
             texts,
         )
-    except Exception:
+    except AuthenticationError:
+        await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
+        return
+    except RateLimitError:
+        await msg.reply_text("요청이 너무 많아서 잠시 제한됐어요. 잠깐 후 다시 시도해줘요.")
+        return
+    except APIConnectionError:
+        await msg.reply_text("네트워크 문제로 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+    except APIError as e:
+        logger.info("OpenAI APIError while fetching embeddings", exc_info=True)
+        await msg.reply_text(f"OpenAI 오류로 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
+        return
+    except Exception as e:
         logger.info("Failed to fetch embeddings", exc_info=True)
-        await msg.reply_text("지금은 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        await msg.reply_text(f"지금은 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
         return
 
     snapshot, _themes = _taste_snapshot_from_bookmarks(bookmarks=items, embeddings=embeddings, max_clusters=max_clusters)
@@ -700,8 +720,8 @@ async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await msg.reply_text("사용법: /taste_member @username\n또는: /taste_member <telegram_user_id>")
         return
 
-    limit = max(10, min(100, int(settings.taste_bookmarks_limit)))
-    max_clusters = max(2, min(8, int(settings.taste_max_clusters)))
+    limit = max(1, min(100, int(settings.taste_bookmarks_limit)))
+    max_clusters = max(1, min(8, int(settings.taste_max_clusters)))
 
     items = []
     if is_postgres_url(settings.database_url):
@@ -725,6 +745,11 @@ async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await msg.reply_text("EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY 설정이 필요해요.")
         return
 
+    items = [b for b in items if (b.text or "").strip()]
+    if not items:
+        await msg.reply_text("해당 멤버의 책갈피 문장이 비어있어요.")
+        return
+
     texts = [b.text for b in items]
     try:
         embeddings = await asyncio.to_thread(
@@ -733,9 +758,22 @@ async def cmd_taste_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             settings.openai_embeddings_model,
             texts,
         )
-    except Exception:
+    except AuthenticationError:
+        await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
+        return
+    except RateLimitError:
+        await msg.reply_text("요청이 너무 많아서 잠시 제한됐어요. 잠깐 후 다시 시도해줘요.")
+        return
+    except APIConnectionError:
+        await msg.reply_text("네트워크 문제로 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+    except APIError as e:
+        logger.info("OpenAI APIError while fetching embeddings (taste_member)", exc_info=True)
+        await msg.reply_text(f"OpenAI 오류로 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
+        return
+    except Exception as e:
         logger.info("Failed to fetch embeddings for admin taste_member", exc_info=True)
-        await msg.reply_text("지금은 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        await msg.reply_text(f"지금은 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
         return
 
     snapshot, _themes = _taste_snapshot_from_bookmarks(bookmarks=items, embeddings=embeddings, max_clusters=max_clusters)
