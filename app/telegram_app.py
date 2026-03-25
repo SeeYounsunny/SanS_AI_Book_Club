@@ -36,6 +36,36 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "운영자: /send_weekly_check 로 주간 진도체크를 보낼 수 있어요.",
     )
 
+async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Prints chat_id for the current chat (group/supergroup/private).
+    Useful for setting TELEGRAM_CHAT_ID env var.
+    """
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if msg is None or chat is None:
+        return
+
+    chat_type = getattr(chat, "type", None) or "unknown"
+    chat_title = getattr(chat, "title", None)
+    username = getattr(user, "username", None) if user else None
+
+    lines = [
+        "Chat ID 정보를 가져왔어요.",
+        f"- chat_id: `{chat.id}`",
+        f"- chat_type: `{chat_type}`",
+    ]
+    if chat_title:
+        lines.append(f"- chat_title: `{chat_title}`")
+    if user:
+        lines.append(f"- your_user_id: `{user.id}`")
+    if username:
+        lines.append(f"- your_username: `@{username}`")
+
+    await msg.reply_text("\n".join(lines))
+
 
 async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.application.bot_data["settings"]
@@ -129,6 +159,7 @@ def build_application(settings: Settings) -> Application:
             sqlite_conn.close()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
 
