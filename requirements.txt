@@ -6,3 +6,5 @@ pydantic-settings==2.6.1
 openai==1.52.2
 aiohttp==3.10.10
 psycopg[binary]==3.2.6
+# Pin httpx to avoid OpenAI client proxy incompatibility (Railway)
+httpx==0.27.2
