@@ -19,6 +19,33 @@ class ProgressEvent:
 
 
 @dataclass(frozen=True)
+class MonthlyWeeklyPlan:
+    month: str
+    week_number: int
+    start_page: int
+    end_page: int
+    summary: str
+    encouragement: str
+    scheduled_date: str
+    sent_at_iso: Optional[str]
+
+
+@dataclass(frozen=True)
+class WeeklyProgressStat:
+    status: str
+    count: int
+
+
+@dataclass(frozen=True)
+class WeeklyProgressMember:
+    telegram_user_id: int
+    telegram_username: Optional[str]
+    full_name: Optional[str]
+    status: str
+    updated_at_iso: str
+
+
+@dataclass(frozen=True)
 class Bookmark:
     id: int
     telegram_user_id: int
@@ -90,6 +117,35 @@ def init_db_sqlite(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS monthly_weekly_plans (
+            month TEXT NOT NULL,
+            week_number INTEGER NOT NULL,
+            start_page INTEGER NOT NULL,
+            end_page INTEGER NOT NULL,
+            summary TEXT NOT NULL,
+            encouragement TEXT NOT NULL,
+            scheduled_date TEXT NOT NULL,
+            sent_at_iso TEXT,
+            PRIMARY KEY (month, week_number)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS weekly_progress_status (
+            month TEXT NOT NULL,
+            week_number INTEGER NOT NULL,
+            telegram_user_id INTEGER NOT NULL,
+            telegram_username TEXT,
+            full_name TEXT,
+            status TEXT NOT NULL,
+            updated_at_iso TEXT NOT NULL,
+            PRIMARY KEY (month, week_number, telegram_user_id)
+        )
+        """
+    )
     conn.commit()
 
 
@@ -138,6 +194,35 @@ def init_db_postgres(conn: psycopg.Connection) -> None:
                 value TEXT NOT NULL,
                 updated_at_iso TEXT NOT NULL,
                 PRIMARY KEY (month, key)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS monthly_weekly_plans (
+                month TEXT NOT NULL,
+                week_number INTEGER NOT NULL,
+                start_page INTEGER NOT NULL,
+                end_page INTEGER NOT NULL,
+                summary TEXT NOT NULL,
+                encouragement TEXT NOT NULL,
+                scheduled_date TEXT NOT NULL,
+                sent_at_iso TEXT,
+                PRIMARY KEY (month, week_number)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS weekly_progress_status (
+                month TEXT NOT NULL,
+                week_number INTEGER NOT NULL,
+                telegram_user_id BIGINT NOT NULL,
+                telegram_username TEXT,
+                full_name TEXT,
+                status TEXT NOT NULL,
+                updated_at_iso TEXT NOT NULL,
+                PRIMARY KEY (month, week_number, telegram_user_id)
             )
             """
         )
@@ -254,6 +339,264 @@ def get_month_setting_postgres(conn: psycopg.Connection, *, month: str, key: str
     if row is None:
         return None
     return str(row[0])
+
+
+def upsert_monthly_weekly_plan_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    month: str,
+    week_number: int,
+    start_page: int,
+    end_page: int,
+    summary: str,
+    encouragement: str,
+    scheduled_date: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO monthly_weekly_plans(
+            month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(month, week_number) DO UPDATE SET
+            start_page=excluded.start_page,
+            end_page=excluded.end_page,
+            summary=excluded.summary,
+            encouragement=excluded.encouragement,
+            scheduled_date=excluded.scheduled_date
+        """,
+        (month, week_number, start_page, end_page, summary, encouragement, scheduled_date),
+    )
+    conn.commit()
+
+
+def upsert_monthly_weekly_plan_postgres(
+    conn: psycopg.Connection,
+    *,
+    month: str,
+    week_number: int,
+    start_page: int,
+    end_page: int,
+    summary: str,
+    encouragement: str,
+    scheduled_date: str,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO monthly_weekly_plans(
+                month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NULL)
+            ON CONFLICT (month, week_number) DO UPDATE SET
+                start_page=EXCLUDED.start_page,
+                end_page=EXCLUDED.end_page,
+                summary=EXCLUDED.summary,
+                encouragement=EXCLUDED.encouragement,
+                scheduled_date=EXCLUDED.scheduled_date
+            """,
+            (month, week_number, start_page, end_page, summary, encouragement, scheduled_date),
+        )
+    conn.commit()
+
+
+def list_monthly_weekly_plans_sqlite(conn: sqlite3.Connection, *, month: str) -> List[MonthlyWeeklyPlan]:
+    rows = conn.execute(
+        """
+        SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+        FROM monthly_weekly_plans
+        WHERE month = ?
+        ORDER BY week_number
+        """,
+        (month,),
+    ).fetchall()
+    return [
+        MonthlyWeeklyPlan(
+            month=str(r["month"]),
+            week_number=int(r["week_number"]),
+            start_page=int(r["start_page"]),
+            end_page=int(r["end_page"]),
+            summary=str(r["summary"]),
+            encouragement=str(r["encouragement"]),
+            scheduled_date=str(r["scheduled_date"]),
+            sent_at_iso=r["sent_at_iso"],
+        )
+        for r in rows
+    ]
+
+
+def list_monthly_weekly_plans_postgres(conn: psycopg.Connection, *, month: str) -> List[MonthlyWeeklyPlan]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+            FROM monthly_weekly_plans
+            WHERE month = %s
+            ORDER BY week_number
+            """,
+            (month,),
+        )
+        rows = cur.fetchall()
+    return [
+        MonthlyWeeklyPlan(
+            month=str(r[0]),
+            week_number=int(r[1]),
+            start_page=int(r[2]),
+            end_page=int(r[3]),
+            summary=str(r[4]),
+            encouragement=str(r[5]),
+            scheduled_date=str(r[6]),
+            sent_at_iso=r[7],
+        )
+        for r in rows
+    ]
+
+
+def upsert_weekly_progress_status_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    month: str,
+    week_number: int,
+    telegram_user_id: int,
+    telegram_username: Optional[str],
+    full_name: Optional[str],
+    status: str,
+    now: Optional[datetime] = None,
+) -> None:
+    if now is None:
+        now = datetime.utcnow()
+    updated_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+    conn.execute(
+        """
+        INSERT INTO weekly_progress_status(
+            month, week_number, telegram_user_id, telegram_username, full_name, status, updated_at_iso
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(month, week_number, telegram_user_id) DO UPDATE SET
+            telegram_username=excluded.telegram_username,
+            full_name=excluded.full_name,
+            status=excluded.status,
+            updated_at_iso=excluded.updated_at_iso
+        """,
+        (month, week_number, telegram_user_id, telegram_username, full_name, status, updated_at_iso),
+    )
+    conn.commit()
+
+
+def upsert_weekly_progress_status_postgres(
+    conn: psycopg.Connection,
+    *,
+    month: str,
+    week_number: int,
+    telegram_user_id: int,
+    telegram_username: Optional[str],
+    full_name: Optional[str],
+    status: str,
+    now: Optional[datetime] = None,
+) -> None:
+    if now is None:
+        now = datetime.utcnow()
+    updated_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO weekly_progress_status(
+                month, week_number, telegram_user_id, telegram_username, full_name, status, updated_at_iso
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (month, week_number, telegram_user_id) DO UPDATE SET
+                telegram_username=EXCLUDED.telegram_username,
+                full_name=EXCLUDED.full_name,
+                status=EXCLUDED.status,
+                updated_at_iso=EXCLUDED.updated_at_iso
+            """,
+            (month, week_number, telegram_user_id, telegram_username, full_name, status, updated_at_iso),
+        )
+    conn.commit()
+
+
+def list_weekly_progress_stats_sqlite(
+    conn: sqlite3.Connection, *, month: str, week_number: int
+) -> List[WeeklyProgressStat]:
+    rows = conn.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM weekly_progress_status
+        WHERE month = ? AND week_number = ?
+        GROUP BY status
+        ORDER BY status
+        """,
+        (month, week_number),
+    ).fetchall()
+    return [WeeklyProgressStat(status=str(r["status"]), count=int(r["count"])) for r in rows]
+
+
+def list_weekly_progress_stats_postgres(
+    conn: psycopg.Connection, *, month: str, week_number: int
+) -> List[WeeklyProgressStat]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM weekly_progress_status
+            WHERE month = %s AND week_number = %s
+            GROUP BY status
+            ORDER BY status
+            """,
+            (month, week_number),
+        )
+        rows = cur.fetchall()
+    return [WeeklyProgressStat(status=str(r[0]), count=int(r[1])) for r in rows]
+
+
+def list_weekly_progress_members_sqlite(
+    conn: sqlite3.Connection, *, month: str, week_number: int
+) -> List[WeeklyProgressMember]:
+    rows = conn.execute(
+        """
+        SELECT telegram_user_id, telegram_username, full_name, status, updated_at_iso
+        FROM weekly_progress_status
+        WHERE month = ? AND week_number = ?
+        ORDER BY status, COALESCE(telegram_username, full_name, CAST(telegram_user_id AS TEXT))
+        """,
+        (month, week_number),
+    ).fetchall()
+    return [
+        WeeklyProgressMember(
+            telegram_user_id=int(r["telegram_user_id"]),
+            telegram_username=r["telegram_username"],
+            full_name=r["full_name"],
+            status=str(r["status"]),
+            updated_at_iso=str(r["updated_at_iso"]),
+        )
+        for r in rows
+    ]
+
+
+def list_weekly_progress_members_postgres(
+    conn: psycopg.Connection, *, month: str, week_number: int
+) -> List[WeeklyProgressMember]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT telegram_user_id, telegram_username, full_name, status, updated_at_iso
+            FROM weekly_progress_status
+            WHERE month = %s AND week_number = %s
+            ORDER BY status, COALESCE(telegram_username, full_name, CAST(telegram_user_id AS TEXT))
+            """,
+            (month, week_number),
+        )
+        rows = cur.fetchall()
+    return [
+        WeeklyProgressMember(
+            telegram_user_id=int(r[0]),
+            telegram_username=r[1],
+            full_name=r[2],
+            status=str(r[3]),
+            updated_at_iso=str(r[4]),
+        )
+        for r in rows
+    ]
 
 
 def init_db(conn: sqlite3.Connection) -> None:

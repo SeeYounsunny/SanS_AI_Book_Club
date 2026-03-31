@@ -23,6 +23,7 @@ from telegram.ext import (
 from app.config import Settings
 from app.db import (
     Bookmark,
+    MonthlyWeeklyPlan,
     connect_postgres,
     connect_sqlite,
     delete_bookmark_postgres,
@@ -44,14 +45,24 @@ from app.db import (
     get_month_setting_sqlite,
     list_bookmarks_postgres,
     list_bookmarks_sqlite,
+    list_monthly_weekly_plans_postgres,
+    list_monthly_weekly_plans_sqlite,
     list_recent_bookmarks_all_postgres,
     list_recent_bookmarks_all_sqlite,
+    list_weekly_progress_members_postgres,
+    list_weekly_progress_members_sqlite,
+    list_weekly_progress_stats_postgres,
+    list_weekly_progress_stats_sqlite,
     update_bookmark_postgres,
     update_bookmark_sqlite,
     set_setting_postgres,
     set_setting_sqlite,
     set_month_setting_postgres,
     set_month_setting_sqlite,
+    upsert_monthly_weekly_plan_postgres,
+    upsert_monthly_weekly_plan_sqlite,
+    upsert_weekly_progress_status_postgres,
+    upsert_weekly_progress_status_sqlite,
 )
 from app.reading_check import WeeklyCheckConfig, build_weekly_check_message
 
@@ -59,8 +70,7 @@ logger = logging.getLogger(__name__)
 
 
 def _default_weekly_check_cfg() -> WeeklyCheckConfig:
-    # Phase 1: hardcoded; later connect to Notion/DB "Books" + weekly plan.
-    return WeeklyCheckConfig(week_number=1, range_label="Chapter 1 ~ 3")
+    return WeeklyCheckConfig(month=_current_month_yyyy_mm(), week_number=1, range_label="p.1-50")
 
 def _is_active_member_status(status: str) -> bool:
     return status in ("creator", "administrator", "member", ChatMember.OWNER, ChatMember.ADMINISTRATOR, ChatMember.MEMBER)
@@ -190,9 +200,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /book_search: 책 검색 (Google Books) (예: /book_search 아무도 미워하지 않는 자의 죽음)",
             "- /book_select: 검색 결과 중 책 확정 (예: /book_select 1)",
             "- /build_book_summary: 확정된 책 소개를 1~3줄로 요약(선택)",
+            "- /build_month_plan: 모임 날짜 기준 4주 계획 생성",
+            "- /show_month_plan: 4주 계획 미리보기",
             "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
             "- /set_pages: 총 페이지 수 수동 설정(보정) (예: /set_pages 320)",
             "- /show_book: (기준 월) 책/모임 일정 확인",
+            "- /weekly_stats [주차]: 주차별 응답 통계",
+            "- /weekly_stats_detail [주차]: 주차별 멤버 상태 상세",
+            "- /share_weekly_stats [주차]: 주차별 통계를 단체방에 공유",
             "- /taste_member: 특정 멤버 취향 스냅샷 보기 (예: /taste_member @username 또는 /taste_member 123456789)",
             "- /club_taste: 북클럽 전체 취향 스냅샷(종합)",
             "- /taste_summary: (멤버 1:1) 취향 요약 1~3줄 (LLM)",
@@ -231,6 +246,7 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /book",
             "- /book_month 2026-04",
             "- /plan",
+            "- 단체방 주간 진도체크 버튼으로 상태를 남겨주세요.",
             "",
             "책갈피(문장 메모) — 1:1 대화에서만",
             "- 저장: /bookmark 인상 깊은 문장",
@@ -660,6 +676,145 @@ def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: s
     return (resp.choices[0].message.content or "").strip()
 
 
+def _get_openai_weekly_plan_text(
+    api_key: str,
+    model: str,
+    *,
+    title: str,
+    authors: str,
+    description: str,
+    month: str,
+    week_number: int,
+    start_page: int,
+    end_page: int,
+) -> Tuple[str, str]:
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "너는 온라인 북클럽 운영진을 돕는 에디터다. 책 소개를 바탕으로 주차별 독서 안내문을 한국어로 만든다. "
+                    "스포일러는 과하지 않게, 흐름과 기대 포인트 중심으로 쓴다."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"월: {month}\n"
+                    f"책 제목: {title}\n"
+                    f"저자: {authors}\n"
+                    f"주차: {week_number}주차\n"
+                    f"읽을 범위: p.{start_page}-{end_page}\n\n"
+                    f"책 소개:\n{description}\n\n"
+                    "출력 형식:\n"
+                    "SUMMARY:\n"
+                    "3~5줄 요약\n\n"
+                    "ENCOURAGEMENT:\n"
+                    "한 줄 응원 문구\n\n"
+                    "제약:\n"
+                    "- 불릿/번호 금지\n"
+                    "- SUMMARY는 3~5줄\n"
+                    "- ENCOURAGEMENT는 1줄\n"
+                    "- 읽고 싶어지게 만들되 과장 금지\n"
+                ),
+            },
+        ],
+        temperature=0.7,
+    )
+    text = (resp.choices[0].message.content or "").strip()
+    summary = ""
+    encouragement = ""
+    if "ENCOURAGEMENT:" in text:
+        before, after = text.split("ENCOURAGEMENT:", 1)
+        summary = before.replace("SUMMARY:", "", 1).strip()
+        encouragement = after.strip().splitlines()[0].strip() if after.strip() else ""
+    else:
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        summary = "\n".join(lines[:4])
+        encouragement = lines[4] if len(lines) > 4 else "이번 주는 완독보다 흐름을 따라가는 데 집중해봐요."
+    summary_lines = [ln.strip() for ln in summary.splitlines() if ln.strip()][:5]
+    if len(summary_lines) < 3:
+        summary_lines = (summary_lines + ["이번 구간은 책의 핵심 흐름을 따라가기 좋은 구간이에요."])[:3]
+    return "\n".join(summary_lines), encouragement or "이번 주도 한 걸음씩 같이 읽어봐요."
+
+
+def _build_weekly_page_ranges(total_pages: int) -> List[Tuple[int, int]]:
+    base = total_pages // 4
+    remainder = total_pages % 4
+    ranges: List[Tuple[int, int]] = []
+    current = 1
+    for idx in range(4):
+        size = base + (1 if idx < remainder else 0)
+        end = current + size - 1
+        ranges.append((current, max(current, end)))
+        current = end + 1
+    return ranges
+
+
+def _build_month_week_schedule(meeting_dt: datetime) -> List[str]:
+    meeting_date = meeting_dt.date()
+    return [datetime.fromordinal(meeting_date.toordinal() - 28 + 7 * i).strftime("%Y-%m-%d") for i in range(4)]
+
+
+def _load_monthly_weekly_plans(settings: Settings, *, month: str) -> List[MonthlyWeeklyPlan]:
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            return list_monthly_weekly_plans_postgres(conn, month=month)
+        finally:
+            conn.close()
+    conn = connect_sqlite(settings.db_path)
+    try:
+        return list_monthly_weekly_plans_sqlite(conn, month=month)
+    finally:
+        conn.close()
+
+
+def _format_weekly_stats_message(
+    month: str,
+    week_number: int,
+    plans: List[MonthlyWeeklyPlan],
+    stats: List[object],
+    members: List[object],
+    *,
+    include_members: bool = False,
+) -> str:
+    counts = {"done": 0, "partial": 0, "not_yet": 0}
+    for stat in stats:
+        counts[getattr(stat, "status")] = int(getattr(stat, "count"))
+    total = sum(counts.values())
+    plan = next((p for p in plans if p.week_number == week_number), None)
+    lines = [
+        f"{month} {week_number}주차 진도 통계",
+        f"- 응답 수: {total}명",
+        f"- 완료: {counts['done']}명",
+        f"- 부분: {counts['partial']}명",
+        f"- 아직: {counts['not_yet']}명",
+    ]
+    if plan is not None:
+        lines.insert(1, f"- 범위: p.{plan.start_page}-{plan.end_page}")
+    if include_members and members:
+        status_map = {
+            "done": "완료",
+            "partial": "부분",
+            "not_yet": "아직",
+        }
+        for key in ("done", "partial", "not_yet"):
+            labels = []
+            for m in members:
+                if getattr(m, "status") != key:
+                    continue
+                username = getattr(m, "telegram_username")
+                full_name = getattr(m, "full_name")
+                uid = getattr(m, "telegram_user_id")
+                labels.append(f"@{username}" if username else (full_name or str(uid)))
+            if labels:
+                lines.extend(["", f"{status_map[key]} 명단", ", ".join(labels)])
+    return "\n".join(lines)
+
+
 async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
         return
@@ -722,6 +877,129 @@ async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_T
             conn.close()
 
     await msg.reply_text("책 요약을 저장했어요.\n\n" + summary)
+
+
+async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    if not settings.openai_api_key:
+        await msg.reply_text("이 기능을 사용하려면 운영진이 OPENAI_API_KEY를 설정해야 해요.")
+        return
+
+    info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
+    title = (info.get("title") or "").strip()
+    authors = (info.get("authors") or "").strip() or "미상"
+    description = (info.get("description") or "").strip()
+    meeting_at = (info.get("meeting_at") or "").strip()
+    page_count_raw = (info.get("page_count") or "").strip()
+    meeting_dt = _parse_meeting_date_for_plan(meeting_at)
+    if not title:
+        await msg.reply_text("먼저 책을 확정해줘요. (/book_select 또는 /set_book)")
+        return
+    if meeting_dt is None:
+        await msg.reply_text("먼저 모임 날짜를 설정해줘요. (/set_meeting)")
+        return
+    if not page_count_raw.isdigit():
+        await msg.reply_text("먼저 총 페이지 수를 설정해줘요. (/set_pages)")
+        return
+    if not description:
+        await msg.reply_text("책 소개가 아직 없어요. 책 검색 후 선택한 책으로 진행해줘요.")
+        return
+
+    page_ranges = _build_weekly_page_ranges(int(page_count_raw))
+    schedule_dates = _build_month_week_schedule(meeting_dt)
+
+    try:
+        generated: List[Tuple[str, str]] = []
+        for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
+            generated.append(
+                await asyncio.to_thread(
+                    _get_openai_weekly_plan_text,
+                    settings.openai_api_key,
+                    settings.openai_summary_model,
+                    title=title,
+                    authors=authors,
+                    description=description,
+                    month=month,
+                    week_number=idx,
+                    start_page=start_page,
+                    end_page=end_page,
+                )
+            )
+    except Exception:
+        logger.info("Failed to build monthly weekly plan", exc_info=True)
+        await msg.reply_text("지금은 4주 계획을 만들지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
+                summary, encouragement = generated[idx - 1]
+                upsert_monthly_weekly_plan_postgres(
+                    conn,
+                    month=month,
+                    week_number=idx,
+                    start_page=start_page,
+                    end_page=end_page,
+                    summary=summary,
+                    encouragement=encouragement,
+                    scheduled_date=schedule_dates[idx - 1],
+                )
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
+                summary, encouragement = generated[idx - 1]
+                upsert_monthly_weekly_plan_sqlite(
+                    conn,
+                    month=month,
+                    week_number=idx,
+                    start_page=start_page,
+                    end_page=end_page,
+                    summary=summary,
+                    encouragement=encouragement,
+                    scheduled_date=schedule_dates[idx - 1],
+                )
+        finally:
+            conn.close()
+
+    preview_lines = [f"{month} 4주 계획을 저장했어요."]
+    for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
+        preview_lines.append(f"- {idx}주차: p.{start_page}-{end_page} / 시작 {schedule_dates[idx - 1]}")
+    await msg.reply_text("\n".join(preview_lines))
+
+
+async def cmd_show_month_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_member_or_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    if not plans:
+        await msg.reply_text("아직 4주 계획이 없어요. 운영진이 /build_month_plan 을 먼저 실행해줘요.")
+        return
+    lines = [f"{month} 4주 읽기 계획", ""]
+    for plan in plans:
+        lines.extend(
+            [
+                f"{plan.week_number}주차 ({plan.scheduled_date})",
+                f"- 범위: p.{plan.start_page}-{plan.end_page}",
+                f"- 안내: {plan.summary.splitlines()[0] if plan.summary else ''}",
+            ]
+        )
+    await msg.reply_text("\n".join(lines))
 
 
 async def cmd_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1558,7 +1836,7 @@ def _parse_meeting_date_for_plan(meeting_at: str) -> Optional[datetime]:
 
 
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Member-facing plan (weekly chunks)
+    # Member-facing plan (prefer saved 4-week plan)
     if not await _require_member_or_admin(update, context):
         return
     msg = update.effective_message
@@ -1567,9 +1845,25 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
     title = info.get("title") or "(미설정)"
     meeting_at = info.get("meeting_at") or ""
     page_count_raw = info.get("page_count") or ""
+    saved_plans = _load_monthly_weekly_plans(settings, month=month)
+    if saved_plans:
+        lines = [f"읽기 계획표 — {title}", f"- 기준 월: {month}", ""]
+        for plan in saved_plans:
+            lines.extend(
+                [
+                    f"{plan.week_number}주차 ({plan.scheduled_date})",
+                    f"- 범위: p.{plan.start_page}-{plan.end_page}",
+                    plan.summary,
+                    plan.encouragement,
+                    "",
+                ]
+            )
+        await msg.reply_text("\n".join(lines).strip())
+        return
 
     meeting_dt = _parse_meeting_date_for_plan(meeting_at)
     if meeting_dt is None:
@@ -1807,8 +2101,23 @@ async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
     settings: Settings = context.application.bot_data["settings"]
     if not await _require_admin(update, context):
         return
-
-    cfg = _default_weekly_check_cfg()
+    info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    week_number = 1
+    if context.args and context.args[0].isdigit():
+        week_number = max(1, min(4, int(context.args[0])))
+    plan = next((p for p in plans if p.week_number == week_number), None)
+    if plan is None:
+        await update.message.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
+        return
+    cfg = WeeklyCheckConfig(
+        month=month,
+        week_number=week_number,
+        range_label=f"p.{plan.start_page}-{plan.end_page}",
+        summary=plan.summary,
+        encouragement=plan.encouragement,
+    )
     text, markup = build_weekly_check_message(cfg)
 
     await context.bot.send_message(
@@ -1816,7 +2125,98 @@ async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
         text=text,
         reply_markup=markup,
     )
-    await update.message.reply_text("주간 진도 체크 메시지를 전송했어요.")
+    await update.message.reply_text(f"{month} {week_number}주차 진도 체크 메시지를 전송했어요.")
+
+
+async def cmd_weekly_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    month = _get_active_month(settings)
+    week_number = 1
+    if context.args and context.args[0].isdigit():
+        week_number = max(1, min(4, int(context.args[0])))
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            stats = list_weekly_progress_stats_postgres(conn, month=month, week_number=week_number)
+            members = list_weekly_progress_members_postgres(conn, month=month, week_number=week_number)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            stats = list_weekly_progress_stats_sqlite(conn, month=month, week_number=week_number)
+            members = list_weekly_progress_members_sqlite(conn, month=month, week_number=week_number)
+        finally:
+            conn.close()
+    await msg.reply_text(_format_weekly_stats_message(month, week_number, plans, stats, members))
+
+
+async def cmd_weekly_stats_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    month = _get_active_month(settings)
+    week_number = 1
+    if context.args and context.args[0].isdigit():
+        week_number = max(1, min(4, int(context.args[0])))
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            stats = list_weekly_progress_stats_postgres(conn, month=month, week_number=week_number)
+            members = list_weekly_progress_members_postgres(conn, month=month, week_number=week_number)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            stats = list_weekly_progress_stats_sqlite(conn, month=month, week_number=week_number)
+            members = list_weekly_progress_members_sqlite(conn, month=month, week_number=week_number)
+        finally:
+            conn.close()
+    await msg.reply_text(
+        _format_weekly_stats_message(month, week_number, plans, stats, members, include_members=True)
+    )
+
+
+async def cmd_share_weekly_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    month = _get_active_month(settings)
+    week_number = 1
+    if context.args and context.args[0].isdigit():
+        week_number = max(1, min(4, int(context.args[0])))
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            stats = list_weekly_progress_stats_postgres(conn, month=month, week_number=week_number)
+            members = list_weekly_progress_members_postgres(conn, month=month, week_number=week_number)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            stats = list_weekly_progress_stats_sqlite(conn, month=month, week_number=week_number)
+            members = list_weekly_progress_members_sqlite(conn, month=month, week_number=week_number)
+        finally:
+            conn.close()
+    text = _format_weekly_stats_message(month, week_number, plans, stats, members)
+    await context.bot.send_message(chat_id=settings.member_chat_id, text=text)
+    await msg.reply_text("멤버 단체방에 주차 통계를 공유했어요.")
 
 
 async def on_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1832,11 +2232,11 @@ async def on_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     data = query.data or ""
     parts = data.split(":")
-    if len(parts) != 3 or parts[0] != "progress":
+    if len(parts) != 4 or parts[0] != "progress":
         await query.answer("알 수 없는 요청이에요.", show_alert=True)
         return
 
-    _, week_raw, status = parts
+    _, month, week_raw, status = parts
     try:
         week_number = int(week_raw)
     except ValueError:
@@ -1858,6 +2258,15 @@ async def on_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 week_number=week_number,
                 status=status,
             )
+            upsert_weekly_progress_status_postgres(
+                pg_conn,
+                month=month,
+                week_number=week_number,
+                telegram_user_id=user.id,
+                telegram_username=user.username,
+                full_name=full_name,
+                status=status,
+            )
         finally:
             pg_conn.close()
     else:
@@ -1869,6 +2278,15 @@ async def on_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 telegram_username=user.username,
                 full_name=full_name,
                 week_number=week_number,
+                status=status,
+            )
+            upsert_weekly_progress_status_sqlite(
+                sqlite_conn,
+                month=month,
+                week_number=week_number,
+                telegram_user_id=user.id,
+                telegram_username=user.username,
+                full_name=full_name,
                 status=status,
             )
         finally:
@@ -1924,11 +2342,16 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("book_search", cmd_book_search))
     app.add_handler(CommandHandler("book_select", cmd_book_select))
     app.add_handler(CommandHandler("build_book_summary", cmd_build_book_summary))
+    app.add_handler(CommandHandler("build_month_plan", cmd_build_month_plan))
+    app.add_handler(CommandHandler("show_month_plan", cmd_show_month_plan))
     app.add_handler(CommandHandler("send_book_info", cmd_send_book_info))
     app.add_handler(CommandHandler("book", cmd_book))
     app.add_handler(CommandHandler("book_month", cmd_book_month))
     app.add_handler(CommandHandler("set_month", cmd_set_month))
     app.add_handler(CommandHandler("plan", cmd_plan))
+    app.add_handler(CommandHandler("weekly_stats", cmd_weekly_stats))
+    app.add_handler(CommandHandler("weekly_stats_detail", cmd_weekly_stats_detail))
+    app.add_handler(CommandHandler("share_weekly_stats", cmd_share_weekly_stats))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
 
     return app
