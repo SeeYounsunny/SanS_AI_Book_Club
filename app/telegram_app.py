@@ -705,7 +705,20 @@ def _format_month_plan_brief(month: str, plans: List[MonthlyWeeklyPlan]) -> str:
 def _build_mention_keyword_reply(text: str, info: dict, plans: List[MonthlyWeeklyPlan]) -> Optional[str]:
     q = (text or "").strip().lower()
     month = info.get("month") or ""
-    if any(k in q for k in ["이번달 책", "이달의 책", "이번 달 책", "책 뭐", "book"]):
+    if any(
+        k in q
+        for k in [
+            "이번달 책",
+            "이달의 책",
+            "이번 달 책",
+            "책 뭐",
+            "읽어야 할 책",
+            "읽는 책",
+            "뭐였지",
+            "뭐지",
+            "book",
+        ]
+    ):
         return _format_book_info_message(info, include_description=False)
     if any(k in q for k in ["모임", "언제", "meeting"]):
         return "\n".join(
@@ -2475,11 +2488,29 @@ async def on_mentioned_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     text = msg.text or ""
-    mention_token = f"@{bot_username}".lower()
-    if mention_token not in text.lower():
+    mention_token = f"@{bot_username}"
+    mention_token_lower = mention_token.lower()
+
+    entities = getattr(msg, "entities", None) or []
+    has_mention = False
+    for entity in entities:
+        entity_type = getattr(entity, "type", "")
+        offset = int(getattr(entity, "offset", 0))
+        length = int(getattr(entity, "length", 0))
+        piece = text[offset : offset + length]
+        if entity_type == "mention" and piece.lower() == mention_token_lower:
+            has_mention = True
+            break
+        if entity_type == "text_mention":
+            target_user = getattr(entity, "user", None)
+            if target_user is not None and getattr(target_user, "id", None) == getattr(context.bot, "id", None):
+                has_mention = True
+                break
+
+    if not has_mention and mention_token_lower not in text.lower():
         return
 
-    question = text.replace(f"@{bot_username}", "").replace(mention_token, "").strip()
+    question = text.replace(mention_token, "").replace(mention_token_lower, "").strip()
     if not question:
         return
 
