@@ -106,11 +106,11 @@ async def _run(app: Application) -> None:
                 await asyncio.sleep(wait_s)
 
     async def weekly_scheduler() -> None:
-        # Check every 60s; send due weekly plans only on Monday 09:00 local server time.
+        # Check every 60s; send weekly plans on their scheduled start date at 09:00 local server time.
         while True:
             try:
                 now = datetime.now()
-                if now.weekday() == 0 and now.hour == 9 and now.minute == 0:
+                if now.hour == 9 and now.minute == 0:
                     sent_count = await send_due_weekly_checks(app)
                     if sent_count:
                         logger.info("Sent %s due weekly check(s)", sent_count)

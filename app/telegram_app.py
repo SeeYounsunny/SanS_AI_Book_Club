@@ -2187,6 +2187,18 @@ async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
         text=text,
         reply_markup=markup,
     )
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            mark_weekly_plan_sent_postgres(conn, month=month, week_number=week_number)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            mark_weekly_plan_sent_sqlite(conn, month=month, week_number=week_number)
+        finally:
+            conn.close()
     await update.message.reply_text(f"{month} {week_number}주차 진도 체크 메시지를 전송했어요.")
 
 

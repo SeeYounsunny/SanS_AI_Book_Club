@@ -460,7 +460,7 @@ def list_due_unsent_weekly_plans_sqlite(
         SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
         FROM monthly_weekly_plans
         WHERE sent_at_iso IS NULL
-          AND scheduled_date <= ?
+          AND scheduled_date = ?
         ORDER BY scheduled_date, month, week_number
         """,
         (today_iso,),
@@ -489,7 +489,7 @@ def list_due_unsent_weekly_plans_postgres(
             SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
             FROM monthly_weekly_plans
             WHERE sent_at_iso IS NULL
-              AND scheduled_date <= %s
+              AND scheduled_date = %s
             ORDER BY scheduled_date, month, week_number
             """,
             (today_iso,),
