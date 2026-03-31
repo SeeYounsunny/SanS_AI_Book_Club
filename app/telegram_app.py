@@ -43,6 +43,8 @@ from app.db import (
     get_setting_sqlite,
     get_month_setting_postgres,
     get_month_setting_sqlite,
+    list_due_unsent_weekly_plans_postgres,
+    list_due_unsent_weekly_plans_sqlite,
     list_bookmarks_postgres,
     list_bookmarks_sqlite,
     list_monthly_weekly_plans_postgres,
@@ -59,6 +61,8 @@ from app.db import (
     set_setting_sqlite,
     set_month_setting_postgres,
     set_month_setting_sqlite,
+    mark_weekly_plan_sent_postgres,
+    mark_weekly_plan_sent_sqlite,
     upsert_monthly_weekly_plan_postgres,
     upsert_monthly_weekly_plan_sqlite,
     upsert_weekly_progress_status_postgres,
@@ -770,6 +774,49 @@ def _load_monthly_weekly_plans(settings: Settings, *, month: str) -> List[Monthl
         return list_monthly_weekly_plans_sqlite(conn, month=month)
     finally:
         conn.close()
+
+
+async def send_due_weekly_checks(app: Application) -> int:
+    settings: Settings = app.bot_data["settings"]
+    today_iso = datetime.now().strftime("%Y-%m-%d")
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            due_plans = list_due_unsent_weekly_plans_postgres(conn, today_iso=today_iso)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            due_plans = list_due_unsent_weekly_plans_sqlite(conn, today_iso=today_iso)
+        finally:
+            conn.close()
+
+    sent_count = 0
+    for plan in due_plans:
+        cfg = WeeklyCheckConfig(
+            month=plan.month,
+            week_number=plan.week_number,
+            range_label=f"p.{plan.start_page}-{plan.end_page}",
+            summary=plan.summary,
+            encouragement=plan.encouragement,
+        )
+        text, markup = build_weekly_check_message(cfg)
+        await app.bot.send_message(chat_id=settings.member_chat_id, text=text, reply_markup=markup)
+        if is_postgres_url(settings.database_url):
+            conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+            try:
+                mark_weekly_plan_sent_postgres(conn, month=plan.month, week_number=plan.week_number)
+            finally:
+                conn.close()
+        else:
+            conn = connect_sqlite(settings.db_path)
+            try:
+                mark_weekly_plan_sent_sqlite(conn, month=plan.month, week_number=plan.week_number)
+            finally:
+                conn.close()
+        sent_count += 1
+    return sent_count
 
 
 def _format_weekly_stats_message(

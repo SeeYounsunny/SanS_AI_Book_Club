@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 
 from aiohttp import web
 from telegram import Update
@@ -9,7 +10,7 @@ from telegram.error import RetryAfter
 from telegram.ext import Application
 
 from app.config import get_settings
-from app.telegram_app import build_application
+from app.telegram_app import build_application, send_due_weekly_checks
 
 
 logging.basicConfig(
@@ -104,8 +105,22 @@ async def _run(app: Application) -> None:
                 )
                 await asyncio.sleep(wait_s)
 
+    async def weekly_scheduler() -> None:
+        # Check every 60s; send due weekly plans only on Monday 09:00 local server time.
+        while True:
+            try:
+                now = datetime.now()
+                if now.weekday() == 0 and now.hour == 9 and now.minute == 0:
+                    sent_count = await send_due_weekly_checks(app)
+                    if sent_count:
+                        logger.info("Sent %s due weekly check(s)", sent_count)
+            except Exception:
+                logger.warning("weekly scheduler iteration failed", exc_info=True)
+            await asyncio.sleep(60)
+
     # Webhook only: no polling (getUpdates) fallback.
     asyncio.create_task(ensure_webhook())
+    asyncio.create_task(weekly_scheduler())
 
     # Run forever until cancelled / terminated
     try:

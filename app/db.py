@@ -452,6 +452,99 @@ def list_monthly_weekly_plans_postgres(conn: psycopg.Connection, *, month: str) 
     ]
 
 
+def list_due_unsent_weekly_plans_sqlite(
+    conn: sqlite3.Connection, *, today_iso: str
+) -> List[MonthlyWeeklyPlan]:
+    rows = conn.execute(
+        """
+        SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+        FROM monthly_weekly_plans
+        WHERE sent_at_iso IS NULL
+          AND scheduled_date <= ?
+        ORDER BY scheduled_date, month, week_number
+        """,
+        (today_iso,),
+    ).fetchall()
+    return [
+        MonthlyWeeklyPlan(
+            month=str(r["month"]),
+            week_number=int(r["week_number"]),
+            start_page=int(r["start_page"]),
+            end_page=int(r["end_page"]),
+            summary=str(r["summary"]),
+            encouragement=str(r["encouragement"]),
+            scheduled_date=str(r["scheduled_date"]),
+            sent_at_iso=r["sent_at_iso"],
+        )
+        for r in rows
+    ]
+
+
+def list_due_unsent_weekly_plans_postgres(
+    conn: psycopg.Connection, *, today_iso: str
+) -> List[MonthlyWeeklyPlan]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+            FROM monthly_weekly_plans
+            WHERE sent_at_iso IS NULL
+              AND scheduled_date <= %s
+            ORDER BY scheduled_date, month, week_number
+            """,
+            (today_iso,),
+        )
+        rows = cur.fetchall()
+    return [
+        MonthlyWeeklyPlan(
+            month=str(r[0]),
+            week_number=int(r[1]),
+            start_page=int(r[2]),
+            end_page=int(r[3]),
+            summary=str(r[4]),
+            encouragement=str(r[5]),
+            scheduled_date=str(r[6]),
+            sent_at_iso=r[7],
+        )
+        for r in rows
+    ]
+
+
+def mark_weekly_plan_sent_sqlite(
+    conn: sqlite3.Connection, *, month: str, week_number: int, now: Optional[datetime] = None
+) -> None:
+    if now is None:
+        now = datetime.utcnow()
+    sent_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+    conn.execute(
+        """
+        UPDATE monthly_weekly_plans
+        SET sent_at_iso = ?
+        WHERE month = ? AND week_number = ?
+        """,
+        (sent_at_iso, month, week_number),
+    )
+    conn.commit()
+
+
+def mark_weekly_plan_sent_postgres(
+    conn: psycopg.Connection, *, month: str, week_number: int, now: Optional[datetime] = None
+) -> None:
+    if now is None:
+        now = datetime.utcnow()
+    sent_at_iso = now.replace(microsecond=0).isoformat() + "Z"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE monthly_weekly_plans
+            SET sent_at_iso = %s
+            WHERE month = %s AND week_number = %s
+            """,
+            (sent_at_iso, month, week_number),
+        )
+    conn.commit()
+
+
 def upsert_weekly_progress_status_sqlite(
     conn: sqlite3.Connection,
     *,
