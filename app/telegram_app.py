@@ -18,6 +18,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from app.config import Settings
@@ -691,6 +693,75 @@ def _format_book_info_message(info: dict, *, include_description: bool = True) -
     return "\n".join(lines)
 
 
+def _format_month_plan_brief(month: str, plans: List[MonthlyWeeklyPlan]) -> str:
+    if not plans:
+        return "아직 4주 계획이 없어요."
+    lines = [f"{month} 읽기 계획", ""]
+    for plan in plans:
+        lines.append(f"{plan.week_number}주차: p.{plan.start_page}-{plan.end_page} ({plan.scheduled_date})")
+    return "\n".join(lines)
+
+
+def _build_mention_keyword_reply(text: str, info: dict, plans: List[MonthlyWeeklyPlan]) -> Optional[str]:
+    q = (text or "").strip().lower()
+    month = info.get("month") or ""
+    if any(k in q for k in ["이번달 책", "이달의 책", "이번 달 책", "책 뭐", "book"]):
+        return _format_book_info_message(info, include_description=False)
+    if any(k in q for k in ["모임", "언제", "meeting"]):
+        return "\n".join(
+            [
+                f"{month} 모임 정보",
+                f"- 책: {info.get('title') or '(미설정)'}",
+                f"- 모임 일정: {info.get('meeting_at') or '(미설정)'}",
+            ]
+        )
+    if any(k in q for k in ["요약", "summary", "무슨 내용", "어떤 내용"]):
+        summary = info.get("summary") or ""
+        if summary:
+            return "\n".join([f"{month} 책 요약", "", summary])
+        return _format_book_info_message(info, include_description=True)
+    if any(k in q for k in ["계획", "plan", "어디까지", "주차"]):
+        return _format_month_plan_brief(month, plans)
+    return None
+
+
+def _get_openai_mention_answer(
+    api_key: str,
+    model: str,
+    *,
+    question: str,
+    month: str,
+    info: dict,
+    plans: List[MonthlyWeeklyPlan],
+) -> str:
+    plan_text = _format_month_plan_brief(month, plans)
+    info_text = _format_book_info_message(info, include_description=True)
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "너는 북클럽 운영 봇이다. 제공된 북클럽 설정 정보만 바탕으로 한국어로 답한다. "
+                    "모르는 내용은 지어내지 말고, 설정되지 않았다고 말한다. 답변은 친절하지만 간결하게 한다."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"[현재 기준 월]\n{month}\n\n"
+                    f"[책/모임 정보]\n{info_text}\n\n"
+                    f"[주차 계획]\n{plan_text}\n\n"
+                    f"[질문]\n{question}"
+                ),
+            },
+        ],
+        temperature=0.4,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
 def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: str, description: str) -> str:
     client = OpenAI(api_key=api_key)
     resp = client.chat.completions.create(
@@ -699,8 +770,9 @@ def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: s
             {
                 "role": "system",
                 "content": (
-                    "너는 온라인 북클럽 운영진의 카피라이터야. 목표는 '멤버가 당장 읽고 싶어지게' 만드는 것이다. "
-                    "책 소개문을 바탕으로 멤버 단체방에 보낼 2~3줄 임팩트 메시지를 한국어로 쓴다."
+                    "너는 온라인 북클럽 운영진의 카피라이터이자 에디터다. 목표는 멤버가 이 책을 "
+                    "'읽어보고 싶다'고 느끼게 만드는 것이다. 책 소개문을 바탕으로 북클럽 공지에 실을 "
+                    "세련되고 흥미로운 한국어 소개문을 쓴다."
                 ),
             },
             {
@@ -710,16 +782,19 @@ def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: s
                     f"저자: {authors}\n\n"
                     f"책 소개(원문):\n{description}\n\n"
                     "요청:\n"
-                    "- 한국어로 2~3줄(줄바꿈 포함)\n"
+                    "- 한국어로 3~4줄(줄바꿈 포함)\n"
                     "- 질문 금지\n"
                     "- 과장 금지(허위/과대 금지), 단정적 평가 금지\n"
-                    "- '어떤 책인지'가 3초 안에 감 오게\n"
-                    "- 핵심 매력 포인트 2개 + 마지막에 짧은 독려 1줄\n"
+                    "- '어떤 책인지'와 '왜 읽고 싶은지'가 바로 느껴지게\n"
+                    "- 책의 핵심 문제의식, 분위기, 기대 포인트를 균형 있게 담기\n"
+                    "- 단순 줄거리 요약보다 독자가 끌릴 만한 맥락을 살리기\n"
+                    "- 마지막 줄은 북클럽 멤버에게 건네는 짧은 독려/초대 문장\n"
                     "- 불릿/번호/이모지 금지\n"
+                    "- 문장은 자연스럽고 세련되게, 너무 광고 문구처럼 과장하지 말 것\n"
                 ),
             },
         ],
-        temperature=0.7,
+        temperature=0.85,
     )
     return (resp.choices[0].message.content or "").strip()
 
@@ -967,12 +1042,15 @@ async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_T
     if not summary:
         await msg.reply_text("요약 결과가 비어있어요. 잠시 후 다시 시도해줘요.")
         return
-    # Soft-enforce 2~3 lines
+    # Soft-enforce 3~4 lines
     lines = [ln.strip() for ln in summary.splitlines() if ln.strip()]
-    if len(lines) < 2:
-        # If model returned 1 line, keep it but add a gentle second line.
-        lines = [lines[0] if lines else summary.strip(), "이번 주, 첫 페이지부터 같이 시작해요."]
-    lines = lines[:3]
+    if len(lines) < 3:
+        filler = [
+            "이번 달 북클럽에서 함께 읽으며 각자 다르게 남는 지점을 이야기해봐도 좋겠어요.",
+            "이번 모임에서 같이 읽고 이야기 나누면 더 재미있을 책이에요.",
+        ]
+        lines = (lines + filler)[:3]
+    lines = lines[:4]
     summary = "\n".join(lines)
 
     month = info.get("month") or _get_active_month(settings)
@@ -2386,6 +2464,60 @@ async def cmd_my_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await msg.reply_text("\n".join(lines))
 
 
+async def on_mentioned_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_member_or_admin(update, context):
+        return
+    msg = update.effective_message
+    if msg is None or not getattr(msg, "text", None):
+        return
+    bot_username = getattr(context.bot, "username", None) or ""
+    if not bot_username:
+        return
+
+    text = msg.text or ""
+    mention_token = f"@{bot_username}".lower()
+    if mention_token not in text.lower():
+        return
+
+    question = text.replace(f"@{bot_username}", "").replace(mention_token, "").strip()
+    if not question:
+        return
+
+    settings: Settings = context.application.bot_data["settings"]
+    info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
+    plans = _load_monthly_weekly_plans(settings, month=month)
+
+    keyword_reply = _build_mention_keyword_reply(question, info, plans)
+    if keyword_reply:
+        await msg.reply_text(keyword_reply)
+        return
+
+    if not settings.openai_api_key:
+        await msg.reply_text("지금은 이 질문에 답할 추가 AI 설정이 없어요. /book, /plan 같은 명령으로 확인해줘요.")
+        return
+
+    try:
+        answer = await asyncio.to_thread(
+            _get_openai_mention_answer,
+            settings.openai_api_key,
+            settings.openai_summary_model,
+            question=question,
+            month=month,
+            info=info,
+            plans=plans,
+        )
+    except Exception:
+        logger.info("Failed to answer mention question", exc_info=True)
+        await msg.reply_text("지금은 이 질문에 답하지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    if not answer:
+        await msg.reply_text("지금은 이 질문에 답하지 못했어요. /book 또는 /plan으로 확인해줘요.")
+        return
+    await msg.reply_text(answer)
+
+
 async def on_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Callbacks should only be accepted from actual book-club members group participants.
     settings: Settings = context.application.bot_data["settings"]
@@ -2521,6 +2653,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("weekly_stats_detail", cmd_weekly_stats_detail))
     app.add_handler(CommandHandler("share_weekly_stats", cmd_share_weekly_stats))
     app.add_handler(CallbackQueryHandler(on_progress_callback, pattern=r"^progress:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_mentioned_text))
 
     return app
 
