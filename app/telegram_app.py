@@ -740,7 +740,12 @@ def _get_openai_weekly_plan_text(
         encouragement = lines[4] if len(lines) > 4 else "이번 주는 완독보다 흐름을 따라가는 데 집중해봐요."
     summary_lines = [ln.strip() for ln in summary.splitlines() if ln.strip()][:5]
     if len(summary_lines) < 3:
-        summary_lines = (summary_lines + ["이번 구간은 책의 핵심 흐름을 따라가기 좋은 구간이에요."])[:3]
+        summary_lines = (
+            summary_lines
+            + [
+                f"이번 구간에서는 p.{start_page}-{end_page} 흐름을 편하게 따라가며 읽으면 좋아요."
+            ]
+        )[:3]
     return "\n".join(summary_lines), encouragement or "이번 주도 한 걸음씩 같이 읽어봐요."
 
 
