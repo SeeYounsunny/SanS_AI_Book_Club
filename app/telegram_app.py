@@ -43,6 +43,8 @@ from app.db import (
     get_setting_sqlite,
     get_month_setting_postgres,
     get_month_setting_sqlite,
+    get_user_weekly_status_map_postgres,
+    get_user_weekly_status_map_sqlite,
     list_due_unsent_weekly_plans_postgres,
     list_due_unsent_weekly_plans_sqlite,
     list_bookmarks_postgres,
@@ -250,6 +252,7 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /book",
             "- /book_month 2026-04",
             "- /plan",
+            "- /my_progress",
             "- 단체방 주간 진도체크 버튼으로 상태를 남겨주세요.",
             "",
             "책갈피(문장 메모) — 1:1 대화에서만",
@@ -739,13 +742,6 @@ def _get_openai_weekly_plan_text(
         summary = "\n".join(lines[:4])
         encouragement = lines[4] if len(lines) > 4 else "이번 주는 완독보다 흐름을 따라가는 데 집중해봐요."
     summary_lines = [ln.strip() for ln in summary.splitlines() if ln.strip()][:5]
-    if len(summary_lines) < 3:
-        summary_lines = (
-            summary_lines
-            + [
-                f"이번 구간에서는 p.{start_page}-{end_page} 흐름을 편하게 따라가며 읽으면 좋아요."
-            ]
-        )[:3]
     return "\n".join(summary_lines), encouragement or "이번 주도 한 걸음씩 같이 읽어봐요."
 
 
@@ -2279,6 +2275,53 @@ async def cmd_share_weekly_stats(update: Update, context: ContextTypes.DEFAULT_T
     await msg.reply_text("멤버 단체방에 주차 통계를 공유했어요.")
 
 
+async def cmd_my_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_member_or_admin(update, context):
+        return
+    msg = update.effective_message
+    user = update.effective_user
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None or user is None:
+        return
+
+    month = _get_active_month(settings)
+    if context.args:
+        parsed = _parse_month_yyyy_mm(context.args[0])
+        if not parsed:
+            await msg.reply_text("사용법: /my_progress\n또는: /my_progress 2026-04")
+            return
+        month = parsed
+
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            status_map = get_user_weekly_status_map_postgres(conn, month=month, telegram_user_id=user.id)
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            status_map = get_user_weekly_status_map_sqlite(conn, month=month, telegram_user_id=user.id)
+        finally:
+            conn.close()
+
+    label_map = {
+        "done": "✅ 완료",
+        "partial": "🟡 부분",
+        "not_yet": "🔴 아직",
+    }
+    lines = [f"{month} 내 진도 현황", ""]
+    for week_number in range(1, 5):
+        plan = next((p for p in plans if p.week_number == week_number), None)
+        status = label_map.get(status_map.get(week_number, ""), "미응답")
+        if plan is not None:
+            lines.append(f"{week_number}주차 p.{plan.start_page}-{plan.end_page}: {status}")
+        else:
+            lines.append(f"{week_number}주차: {status}")
+    await msg.reply_text("\n".join(lines))
+
+
 async def on_progress_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Callbacks should only be accepted from actual book-club members group participants.
     settings: Settings = context.application.bot_data["settings"]
@@ -2409,6 +2452,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("book_month", cmd_book_month))
     app.add_handler(CommandHandler("set_month", cmd_set_month))
     app.add_handler(CommandHandler("plan", cmd_plan))
+    app.add_handler(CommandHandler("my_progress", cmd_my_progress))
     app.add_handler(CommandHandler("weekly_stats", cmd_weekly_stats))
     app.add_handler(CommandHandler("weekly_stats_detail", cmd_weekly_stats_detail))
     app.add_handler(CommandHandler("share_weekly_stats", cmd_share_weekly_stats))

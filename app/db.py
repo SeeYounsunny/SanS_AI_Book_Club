@@ -692,6 +692,60 @@ def list_weekly_progress_members_postgres(
     ]
 
 
+def list_user_weekly_progress_sqlite(
+    conn: sqlite3.Connection, *, month: str, telegram_user_id: int
+) -> List[WeeklyProgressMember]:
+    rows = conn.execute(
+        """
+        SELECT telegram_user_id, telegram_username, full_name, status, updated_at_iso
+        FROM weekly_progress_status
+        WHERE month = ? AND telegram_user_id = ?
+        ORDER BY updated_at_iso
+        """,
+        (month, telegram_user_id),
+    ).fetchall()
+    return [
+        WeeklyProgressMember(
+            telegram_user_id=int(r["telegram_user_id"]),
+            telegram_username=r["telegram_username"],
+            full_name=r["full_name"],
+            status=str(r["status"]),
+            updated_at_iso=str(r["updated_at_iso"]),
+        )
+        for r in rows
+    ]
+
+
+def get_user_weekly_status_map_sqlite(
+    conn: sqlite3.Connection, *, month: str, telegram_user_id: int
+) -> dict:
+    rows = conn.execute(
+        """
+        SELECT week_number, status
+        FROM weekly_progress_status
+        WHERE month = ? AND telegram_user_id = ?
+        """,
+        (month, telegram_user_id),
+    ).fetchall()
+    return {int(r["week_number"]): str(r["status"]) for r in rows}
+
+
+def get_user_weekly_status_map_postgres(
+    conn: psycopg.Connection, *, month: str, telegram_user_id: int
+) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT week_number, status
+            FROM weekly_progress_status
+            WHERE month = %s AND telegram_user_id = %s
+            """,
+            (month, telegram_user_id),
+        )
+        rows = cur.fetchall()
+    return {int(r[0]): str(r[1]) for r in rows}
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     # Backwards compatibility for existing sqlite usage.
     init_db_sqlite(conn)

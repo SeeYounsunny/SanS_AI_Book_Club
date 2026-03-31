@@ -25,7 +25,7 @@ def build_weekly_check_message(cfg: WeeklyCheckConfig) -> Tuple[str, InlineKeybo
     if cfg.next_range_label:
         parts.extend(["", f"🗓 이번주 예고 범위: {cfg.next_range_label}"])
     if cfg.summary:
-        parts.extend(["", "### 이번주 흐름 - 요약", cfg.summary])
+        parts.extend(["", "[이번주 흐름 - 요약]", cfg.summary])
     if cfg.encouragement:
         parts.extend(["", cfg.encouragement])
     parts.extend(["", "지난주 범위를 얼마나 읽었는지 선택해주세요."])
