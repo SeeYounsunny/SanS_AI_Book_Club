@@ -235,8 +235,12 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     msg = update.effective_message
+    bot = context.bot
     if msg is None:
         return
+
+    bot_username = getattr(bot, "username", None) or ""
+    dm_link = f"https://t.me/{bot_username}" if bot_username else ""
 
     text = "\n".join(
         [
@@ -255,6 +259,7 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /my_progress",
             "- 단체방 주간 진도체크 버튼으로 상태를 남겨주세요.",
             "- 이전 주차 메시지가 남아 있으면, 같은 버튼을 다시 눌러 상태를 업데이트할 수 있어요.",
+            "- 1:1 대화 바로가기: " + (dm_link or "봇 프로필에서 개인 대화를 열어주세요."),
             "",
             "책갈피(문장 메모) — 1:1 대화에서만",
             "- 저장: /bookmark 인상 깊은 문장",
@@ -2277,6 +2282,8 @@ async def cmd_share_weekly_stats(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def cmd_my_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private_chat(update):
+        return
     if not await _require_member_or_admin(update, context):
         return
     msg = update.effective_message
