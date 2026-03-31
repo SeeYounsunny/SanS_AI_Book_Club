@@ -794,13 +794,10 @@ async def send_due_weekly_checks(app: Application) -> int:
 
     sent_count = 0
     for plan in due_plans:
-        cfg = WeeklyCheckConfig(
-            month=plan.month,
-            week_number=plan.week_number,
-            range_label=f"p.{plan.start_page}-{plan.end_page}",
-            summary=plan.summary,
-            encouragement=plan.encouragement,
-        )
+        month_plans = _load_monthly_weekly_plans(settings, month=plan.month)
+        cfg = _weekly_check_cfg_from_plans(plan.month, plan.week_number, month_plans)
+        if cfg is None:
+            continue
         text, markup = build_weekly_check_message(cfg)
         await app.bot.send_message(chat_id=settings.member_chat_id, text=text, reply_markup=markup)
         if is_postgres_url(settings.database_url):
@@ -860,6 +857,24 @@ def _format_weekly_stats_message(
             if labels:
                 lines.extend(["", f"{status_map[key]} 명단", ", ".join(labels)])
     return "\n".join(lines)
+
+
+def _weekly_check_cfg_from_plans(month: str, week_number: int, plans: List[MonthlyWeeklyPlan]) -> Optional[WeeklyCheckConfig]:
+    plan = next((p for p in plans if p.week_number == week_number), None)
+    if plan is None:
+        return None
+    next_plan = next((p for p in plans if p.week_number == week_number + 1), None)
+    encouragement = plan.encouragement
+    if week_number == 4:
+        encouragement = "이제 모임 전까지 남은 부분만 차근차근 읽어보면 돼요. 끝까지 화이팅이에요."
+    return WeeklyCheckConfig(
+        month=month,
+        week_number=week_number,
+        range_label=f"p.{plan.start_page}-{plan.end_page}",
+        next_range_label=(f"p.{next_plan.start_page}-{next_plan.end_page}" if next_plan else ""),
+        summary=plan.summary,
+        encouragement=encouragement,
+    )
 
 
 async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2154,17 +2169,10 @@ async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
     week_number = 1
     if context.args and context.args[0].isdigit():
         week_number = max(1, min(4, int(context.args[0])))
-    plan = next((p for p in plans if p.week_number == week_number), None)
-    if plan is None:
+    cfg = _weekly_check_cfg_from_plans(month, week_number, plans)
+    if cfg is None:
         await update.message.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
         return
-    cfg = WeeklyCheckConfig(
-        month=month,
-        week_number=week_number,
-        range_label=f"p.{plan.start_page}-{plan.end_page}",
-        summary=plan.summary,
-        encouragement=plan.encouragement,
-    )
     text, markup = build_weekly_check_message(cfg)
 
     await context.bot.send_message(
