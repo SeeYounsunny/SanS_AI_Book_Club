@@ -440,6 +440,41 @@ async def _google_books_search(*, query: str, api_key: Optional[str], max_result
     return results
 
 
+async def _search_book_description_for_summary(
+    *,
+    title: str,
+    authors: str,
+    api_key: Optional[str],
+) -> Optional[str]:
+    title = (title or "").strip()
+    authors = (authors or "").strip()
+    if not title:
+        return None
+
+    queries = []
+    if authors and authors != "미상":
+        queries.append(f'intitle:"{title}" inauthor:"{authors.split(",")[0].strip()}"')
+        queries.append(f'{title} {authors}')
+    queries.append(f'intitle:"{title}"')
+    queries.append(title)
+
+    for query in queries:
+        try:
+            results = await _google_books_search(query=query, api_key=api_key, max_results=3)
+        except Exception:
+            logger.info("book description lookup failed", exc_info=True)
+            continue
+        for item in results:
+            desc = (item.get("description") or "").strip()
+            if len(desc) >= 80:
+                return desc
+        for item in results:
+            desc = (item.get("description") or "").strip()
+            if desc:
+                return desc
+    return None
+
+
 def _format_book_candidate_line(idx: int, b: dict) -> str:
     authors = ", ".join(b.get("authors") or []) or "저자 미상"
     pages = b.get("page_count")
@@ -902,8 +937,17 @@ async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_T
     if not title or title == "(미설정)":
         await msg.reply_text("먼저 /set_book 또는 /book_select 로 책을 확정해줘요.")
         return
+
+    searched_description = await _search_book_description_for_summary(
+        title=title,
+        authors=authors,
+        api_key=settings.google_books_api_key,
+    )
+    description = searched_description or description
     if not description:
-        await msg.reply_text("책 소개(description)가 없어서 요약을 만들 수 없어요. (다른 검색 결과를 선택해보세요.)")
+        await msg.reply_text(
+            "책 제목/저자로 다시 찾아봤지만 소개를 충분히 찾지 못했어요. 다른 검색 결과를 선택하거나 수동 설명이 필요해요."
+        )
         return
 
     try:
