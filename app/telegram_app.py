@@ -318,6 +318,35 @@ def _parse_month_yyyy_mm(raw: str) -> Optional[str]:
     return dt.strftime("%Y-%m")
 
 
+def _add_months(month: str, delta: int) -> str:
+    dt = datetime.strptime(month, "%Y-%m")
+    year = dt.year
+    mon = dt.month + delta
+    while mon > 12:
+        year += 1
+        mon -= 12
+    while mon < 1:
+        year -= 1
+        mon += 12
+    return f"{year:04d}-{mon:02d}"
+
+
+def _extract_target_month_from_question(question: str, base_month: str) -> str:
+    q = (question or "").strip().lower()
+    if "다다음달" in q or "다다음 달" in q:
+        return _add_months(base_month, 2)
+    if "다음달" in q or "다음 달" in q:
+        return _add_months(base_month, 1)
+    if "지난달" in q or "지난 달" in q:
+        return _add_months(base_month, -1)
+
+    for m in range(1, 13):
+        if f"{m}월" in q:
+            year = int(base_month.split("-")[0])
+            return f"{year:04d}-{m:02d}"
+    return base_month
+
+
 def _get_active_month(settings: Settings) -> str:
     # Stored in club_settings as "active_month" (YYYY-MM). Fallback to current month.
     active = None
@@ -2515,8 +2544,10 @@ async def on_mentioned_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     settings: Settings = context.application.bot_data["settings"]
-    info = _load_club_book_info(settings)
-    month = info.get("month") or _get_active_month(settings)
+    active_month = _get_active_month(settings)
+    target_month = _extract_target_month_from_question(question, active_month)
+    info = _load_club_book_info(settings, month=target_month)
+    month = info.get("month") or target_month
     plans = _load_monthly_weekly_plans(settings, month=month)
 
     keyword_reply = _build_mention_keyword_reply(question, info, plans)
