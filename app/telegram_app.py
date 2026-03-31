@@ -254,6 +254,7 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /plan",
             "- /my_progress",
             "- 단체방 주간 진도체크 버튼으로 상태를 남겨주세요.",
+            "- 이전 주차 메시지가 남아 있으면, 같은 버튼을 다시 눌러 상태를 업데이트할 수 있어요.",
             "",
             "책갈피(문장 메모) — 1:1 대화에서만",
             "- 저장: /bookmark 인상 깊은 문장",
