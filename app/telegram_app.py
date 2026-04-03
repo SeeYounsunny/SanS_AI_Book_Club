@@ -1914,58 +1914,45 @@ def _pack_bookmarks_for_taste_llm(bookmarks: List[Bookmark]) -> Tuple[str, int, 
     return "\n".join(parts), included, fetched
 
 
-def _get_openai_reader_taste_from_bookmarks(
+def _get_openai_taste_summary_card(
     api_key: str,
     model: str,
     *,
     bulk_text: str,
     meta_note: str,
     book_title: Optional[str],
-    brief: bool,
 ) -> str:
+    """Single-message 취향 써머리: 전체 북마크 인풋, 5~10줄, 이모지·정렬감 있는 톤."""
     client = OpenAI(api_key=api_key)
     book_part = ""
     if book_title and str(book_title).strip():
-        book_part = f"\n[참고: 모임에서 쓰는 책 제목] {str(book_title).strip()}\n"
+        book_part = f"\n[참고: 모임 책 제목] {str(book_title).strip()}\n"
     system = (
-        "너는 독서모임을 돕는 독서코치야. 사용자가 저장한 책갈피(인용·메모) 텍스트만 근거로, "
-        "그 독자가 어떤 주제·가치관·정서·문장에 끌리는지 독서 취향을 분석한다. "
-        "근거 밖 추측은 하지 말고 인용과 연결해 설명한다. 한국어로 답한다."
+        "너는 텔레그램 북클럽 봇이 보내는 메시지를 쓰는 독서 코치야. "
+        "입력은 한 독자가 저장한 책갈피(인용·메모) 전체다. 그 텍스트만 근거로 독서 취향을 조망한다. "
+        "근거 없는 추측·심리 진단·단정적 평가는 금지. '~로 보이는 경향'처럼 완곡하게. 한국어만."
     )
-    if brief:
-        user = (
-            f"{meta_note}{book_part}"
-            "아래는 이 독자가 시간에 걸쳐 저장한 책갈피 모음이야.\n\n"
-            f"{bulk_text}\n\n"
-            "요청:\n"
-            "- 위 내용만 보고 이 독자의 독서 취향을 짧게 정리해.\n"
-            "- 한국어로 3~7문장 정도, 하나의 짧은 문단으로 (불릿·번호 목록 금지).\n"
-            "- 심리 진단·단정 대신 '경향'으로 말하기.\n"
-            "- 마지막에 질문 붙이지 말기.\n"
-            "- 책갈피가 1~2개뿐이면 한계를 한 문장 안에 짧게 언급하고 가능한 범위에서만 말하기.\n"
-        )
-        temperature = 0.45
-    else:
-        user = (
-            f"{meta_note}{book_part}"
-            "아래는 이 독자가 시간에 걸쳐 저장한 책갈피 모음이야. 가능한 한 모두를 한 번에 보고 판단해.\n\n"
-            f"{bulk_text}\n\n"
-            "요청:\n"
-            "- 위 인용들만 근거로 독자의 독서 취향을 분석해 설명해.\n"
-            "- 한국어로 8~18문장 정도, 자연스러운 문단 몇 개로 (과한 마크다운·소제목 남발 금지).\n"
-            "- 어떤 주제·가치·정서·문장 스타일에 반복해서 끌리는지, 인용과 연결해 말하기.\n"
-            "- '이 사람은 ~이다' 같은 단정은 피하고 '~로 보이는 경향'처럼 완곡하게.\n"
-            "- 근거 없는 추측 금지. 책갈피가 적으면 한계를 짧게 밝힌 뒤 가능한 범위만.\n"
-            "- 질문으로 끝내지 말 것.\n"
-        )
-        temperature = 0.55
+    user = (
+        f"{meta_note}{book_part}"
+        "아래는 이 독자의 책갈피를 시간 순으로 모은 것이다 (최신 위주, 분량 제한이 있으면 메타에 적혀 있음).\n\n"
+        f"{bulk_text}\n\n"
+        "출력 형식 (텔레그램에 그대로 보낼 한 덩어리 문자열):\n"
+        "- 전체 줄 수 **5줄 이상 10줄 이하** (빈 줄 없이, 줄마다 한 가지 생각).\n"
+        "- 1줄째: 인사/후크. 예시 느낌 — '📚 …하시는 독자이시군요!' 처럼 따뜻하게 (문장은 인용 그대로 복붙하지 말 것).\n"
+        "- 2~(끝-2)줄: 저장 문장들을 **전체적으로 조망**한 취향 요약. 주제·가치·정서·문장 취향이 어떻게 겹치는지. "
+        "필요하면 줄 앞에 가벼운 이모지 1개(✨ 💭 🔖 등)만 붙여도 됨. `-` `1.` 같은 마크다운 목록은 쓰지 말 것.\n"
+        "- 마지막에서 두 번째 줄: 오늘도 잠깐이라도 읽기를 권하는 한 줄 (이모지 1개 포함).\n"
+        "- 마지막 줄: 기억에 남는 문장을 더 모으라는 독려 한 줄 (이모지 1개 포함, 질문으로 끝내지 말 것).\n"
+        "- 책갈피가 매우 적으면 한두 줄 안에 한계를 짧게 인정하고, 가능한 범위만 말하기.\n"
+    )
     resp = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=temperature,
+        temperature=0.55,
+        max_tokens=450,
     )
     return (resp.choices[0].message.content or "").strip()
 
@@ -2007,97 +1994,19 @@ def _get_openai_taste_summary(api_key: str, model: str, prompt: str) -> str:
     return text
 
 
-async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Admin-only: load saved bookmarks, send in bulk to LLM, explain reading taste.
+async def cmd_taste_retired(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/taste` 제거 안내 (운영진 1:1)."""
     if not await _require_private_chat(update):
         return
     if not await _require_admin(update, context):
         return
-
     msg = update.effective_message
-    user = update.effective_user
-    settings: Settings = context.application.bot_data["settings"]
-    if msg is None or user is None:
-        return
-
-    openai_key = (settings.openai_api_key or "").strip()
-    if not openai_key:
-        await msg.reply_text("OPENAI_API_KEY 가 설정되어 있어야 해요.")
-        return
-
-    fetch_limit = min(100, max(1, int(settings.bookmarks_max_per_user)))
-    items: List[Bookmark] = []
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-        try:
-            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, limit=fetch_limit)
-        finally:
-            conn.close()
-    else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, limit=fetch_limit)
-        finally:
-            conn.close()
-
-    if not items:
-        await msg.reply_text("아직 저장된 책갈피가 없어요. 먼저 /bookmark 로 문장을 저장해보세요.")
-        return
-
-    items = [b for b in items if (b.text or "").strip()]
-    if not items:
-        await msg.reply_text("분석할 수 있는 책갈피 문장이 없어요.")
-        return
-
-    bulk_text, included, fetched = _pack_bookmarks_for_taste_llm(items)
-    if not bulk_text.strip():
-        await msg.reply_text("책갈피 텍스트가 비어 있어요.")
-        return
-
-    if included < fetched:
-        meta_note = f"(※ 저장 책갈피 {fetched}개 중 길이·개수 제한으로 최근 {included}개만 포함)\n"
-    else:
-        meta_note = f"(※ 저장 책갈피 {included}개 포함)\n"
-
-    book_title = _load_global_book_title(settings)
-
-    try:
-        answer = await _with_openai_retries(
-            _get_openai_reader_taste_from_bookmarks,
-            openai_key,
-            settings.openai_summary_model,
-            bulk_text=bulk_text,
-            meta_note=meta_note,
-            book_title=book_title,
-            brief=False,
-        )
-    except AuthenticationError:
-        await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
-        return
-    except RateLimitError as e:
-        await msg.reply_text(_rate_limit_hint(e))
-        return
-    except APIConnectionError:
-        await msg.reply_text("네트워크 문제로 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
-        return
-    except APIError as e:
-        logger.info("OpenAI APIError while generating taste (bulk LLM)", exc_info=True)
-        await msg.reply_text(f"OpenAI 오류로 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
-        return
-    except Exception as e:
-        logger.info("Failed to generate taste (bulk LLM)", exc_info=True)
-        await msg.reply_text(f"지금은 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
-        return
-
-    if not answer:
-        await msg.reply_text("응답이 비어 있어요. 잠시 후 다시 시도해줘요.")
-        return
-
-    await _reply_telegram_chunks(msg, answer)
+    if msg is not None:
+        await msg.reply_text("/taste 는 없어졌어요. 책갈피 전체 기준 취향은 /taste_summary 를 써주세요.")
 
 
 async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Admin-only: same bulk bookmarks, shorter LLM answer.
+    # Admin-only: bulk bookmarks → LLM 취향 써머리 카드 (5~10줄).
     if not await _require_private_chat(update):
         return
     if not await _require_admin(update, context):
@@ -2148,13 +2057,12 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     try:
         summary = await _with_openai_retries(
-            _get_openai_reader_taste_from_bookmarks,
+            _get_openai_taste_summary_card,
             openai_key,
             settings.openai_summary_model,
             bulk_text=bulk_text,
             meta_note=meta_note,
             book_title=book_title,
-            brief=True,
         )
     except AuthenticationError:
         await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
@@ -2201,8 +2109,8 @@ async def cmd_diag_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     is_admin = await _is_member_of(settings.admin_chat_id, update, context)
 
     lines = [
-        "취향 기능 진단 (/taste / /taste_summary) — 책갈피 일괄 + 채팅완성(LLM)",
-        f"- EMBEDDINGS_PROVIDER: {embeddings_provider or '(empty)'} (선택, /taste·/taste_summary 에는 불필요)",
+        "취향 진단 (/taste_summary) — 책갈피 일괄 + 채팅완성(LLM)",
+        f"- EMBEDDINGS_PROVIDER: {embeddings_provider or '(empty)'} (선택, /taste_summary 에는 불필요)",
         f"- has OPENAI_API_KEY: {'yes' if has_openai_key else 'no'}",
         f"- member chat membership check: {'ok' if is_member else 'fail'}",
         f"- admin chat membership check: {'ok' if is_admin else 'fail'}",
@@ -3007,7 +2915,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("bookmarks", cmd_bookmarks))
     app.add_handler(CommandHandler("bookmark_edit", cmd_bookmark_edit))
     app.add_handler(CommandHandler("bookmark_delete", cmd_bookmark_delete))
-    app.add_handler(CommandHandler("taste", cmd_taste))
+    app.add_handler(CommandHandler("taste", cmd_taste_retired))
     app.add_handler(CommandHandler("taste_summary", cmd_taste_summary))
     app.add_handler(CommandHandler("diag_taste", cmd_diag_taste))
     app.add_handler(CommandHandler("set_book", cmd_set_book))

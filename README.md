@@ -7,7 +7,7 @@
 - 월별 책/모임 정보를 바탕으로 **4주 읽기 계획** 생성
 - 주차 시작일 오전 9시에 멤버 단체방으로 **주차 진도 체크** 메시지 자동 전송
 - 멤버 1:1 채팅에서 책갈피(북마크) 저장/조회/수정/삭제
-- 북마크 기반 취향 스냅샷(`/taste`) + 1~3줄 취향 요약(`/taste_summary`)
+- (운영진 1:1) 저장한 책갈피 전체를 넣어 **취향 써머리** (`/taste_summary`). `/taste` 는 제거됨(안내 메시지만)
 - 운영진용: **월별(YYYY-MM) 책/모임 관리**, 주차 통계, 멤버/클럽 취향 보기
 - 단체방에서 `@봇이름 질문` 형태로 현재 설정된 책/모임/계획을 묻는 Q&A
 
@@ -23,7 +23,7 @@
 - `MEMBER_CHAT_ID`: 북클럽 **멤버 단체방** chat id
 - `ADMIN_CHAT_ID`: **운영진 단체방** chat id
 - 운영진 명령은 **운영진 단체방 멤버만** 실행 가능
-- 멤버 명령 중 북마크/취향 기능, `/my_progress`는 **멤버 1:1(private) 채팅에서만** 동작
+- 멤버 명령 중 북마크·`/my_progress`는 **멤버 1:1(private) 채팅에서만** 동작
 
 chat id 확인은 운영진 전용 `/chatid`를 사용하세요.
 
@@ -31,8 +31,9 @@ chat id 확인은 운영진 전용 `/chatid`를 사용하세요.
 
 - 멤버:
   - `/book`, `/book_month YYYY-MM`, `/plan`
-  - (1:1) `/my_progress`, `/bookmark`, `/bookmarks`, `/taste`, `/taste_summary`
+  - (1:1) `/my_progress`, `/bookmark`, `/bookmarks`
 - 운영진:
+  - (1:1) `/taste_summary` — 내 책갈피 전체 기준 취향 써머리
   - `/set_month YYYY-MM`, `/book_search`, `/book_select`, `/set_book`
   - `/build_book_summary`, `/send_book_info`
   - `/set_meeting`, `/set_pages`, `/show_book`
