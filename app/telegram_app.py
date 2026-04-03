@@ -236,6 +236,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if msg is None:
         return
 
+    # taste_* / diag_taste 등 비공개 운영용 명령은 여기에 나열하지 않음.
+
     text = "\n".join(
         [
             "운영진용 명령어",
@@ -272,6 +274,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Member-facing usage guide. Keep this usable in the member group only.
+    # taste_* 등 운영 전용 기능은 노출하지 않음.
     if not await _require_member(update, context):
         return
 
@@ -1995,14 +1998,14 @@ def _get_openai_taste_summary(api_key: str, model: str, prompt: str) -> str:
 
 
 async def cmd_taste_retired(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """`/taste` 제거 안내 (운영진 1:1)."""
+    """구 `/taste` — 비노출 유지: 대체 명령을 안내 문구에 쓰지 않음."""
     if not await _require_private_chat(update):
         return
     if not await _require_admin(update, context):
         return
     msg = update.effective_message
     if msg is not None:
-        await msg.reply_text("/taste 는 없어졌어요. 책갈피 전체 기준 취향은 /taste_summary 를 써주세요.")
+        await msg.reply_text("지원하지 않는 명령이에요.")
 
 
 async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

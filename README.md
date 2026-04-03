@@ -7,8 +7,7 @@
 - 월별 책/모임 정보를 바탕으로 **4주 읽기 계획** 생성
 - 주차 시작일 오전 9시에 멤버 단체방으로 **주차 진도 체크** 메시지 자동 전송
 - 멤버 1:1 채팅에서 책갈피(북마크) 저장/조회/수정/삭제
-- (운영진 1:1) 저장한 책갈피 전체를 넣어 **취향 써머리** (`/taste_summary`). `/taste` 는 제거됨(안내 메시지만)
-- 운영진용: **월별(YYYY-MM) 책/모임 관리**, 주차 통계, 멤버/클럽 취향 보기
+- 운영진용: **월별(YYYY-MM) 책/모임 관리**, 주차 통계 등
 - 단체방에서 `@봇이름 질문` 형태로 현재 설정된 책/모임/계획을 묻는 Q&A
 
 ## 월별(이달의 책) 구조
@@ -33,7 +32,6 @@ chat id 확인은 운영진 전용 `/chatid`를 사용하세요.
   - `/book`, `/book_month YYYY-MM`, `/plan`
   - (1:1) `/my_progress`, `/bookmark`, `/bookmarks`
 - 운영진:
-  - (1:1) `/taste_summary` — 내 책갈피 전체 기준 취향 써머리
   - `/set_month YYYY-MM`, `/book_search`, `/book_select`, `/set_book`
   - `/build_book_summary`, `/send_book_info`
   - `/set_meeting`, `/set_pages`, `/show_book`
@@ -109,7 +107,7 @@ python -m app.main
 - `MEMBER_CHAT_ID`
 - `ADMIN_CHAT_ID`
 
-선택(취향 기능 사용 시 필요):
+선택(OpenAI 연동 시):
 
 - `OPENAI_API_KEY`
 - `OPENAI_EMBEDDINGS_MODEL` (기본: `text-embedding-3-small`)
