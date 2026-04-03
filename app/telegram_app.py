@@ -1156,11 +1156,19 @@ def _weekly_check_cfg_from_plans(month: str, week_number: int, plans: List[Month
 
 
 async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_admin(update, context):
-        return
     msg = update.effective_message
     settings: Settings = context.application.bot_data["settings"]
     if msg is None:
+        return
+
+    # Members should never trigger OpenAI calls. Show cached book info instead.
+    is_admin = await _is_member_of(settings.admin_chat_id, update, context)
+    if not is_admin:
+        info = _load_club_book_info(settings)
+        await msg.reply_text(_format_book_info_message(info))
+        return
+
+    if not await _require_admin(update, context):
         return
     if not settings.openai_api_key:
         await msg.reply_text("이 기능을 사용하려면 운영진이 OPENAI_API_KEY를 설정해야 해요.")
@@ -1240,11 +1248,18 @@ async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_admin(update, context):
-        return
     msg = update.effective_message
     settings: Settings = context.application.bot_data["settings"]
     if msg is None:
+        return
+
+    # Members should never trigger OpenAI calls. Show cached plan instead.
+    is_admin = await _is_member_of(settings.admin_chat_id, update, context)
+    if not is_admin:
+        await cmd_show_month_plan(update, context)
+        return
+
+    if not await _require_admin(update, context):
         return
     if not settings.openai_api_key:
         await msg.reply_text("이 기능을 사용하려면 운영진이 OPENAI_API_KEY를 설정해야 해요.")
