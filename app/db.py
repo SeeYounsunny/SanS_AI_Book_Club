@@ -28,6 +28,8 @@ class MonthlyWeeklyPlan:
     encouragement: str
     scheduled_date: str
     sent_at_iso: Optional[str]
+    quiz_json: str
+    discussion_topic: str
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,25 @@ def connect_sqlite(db_path: str) -> sqlite3.Connection:
 
 def connect_postgres(database_url: str) -> psycopg.Connection:
     return psycopg.connect(database_url)
+
+
+def migrate_monthly_weekly_plan_engagement_sqlite(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("PRAGMA table_info(monthly_weekly_plans)").fetchall()
+    cols = {str(r[1]) for r in rows}
+    if "quiz_json" not in cols:
+        conn.execute("ALTER TABLE monthly_weekly_plans ADD COLUMN quiz_json TEXT NOT NULL DEFAULT ''")
+    if "discussion_topic" not in cols:
+        conn.execute("ALTER TABLE monthly_weekly_plans ADD COLUMN discussion_topic TEXT NOT NULL DEFAULT ''")
+
+
+def migrate_monthly_weekly_plan_engagement_postgres(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE monthly_weekly_plans ADD COLUMN IF NOT EXISTS quiz_json TEXT NOT NULL DEFAULT ''"
+        )
+        cur.execute(
+            "ALTER TABLE monthly_weekly_plans ADD COLUMN IF NOT EXISTS discussion_topic TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def init_db_sqlite(conn: sqlite3.Connection) -> None:
@@ -128,10 +149,13 @@ def init_db_sqlite(conn: sqlite3.Connection) -> None:
             encouragement TEXT NOT NULL,
             scheduled_date TEXT NOT NULL,
             sent_at_iso TEXT,
+            quiz_json TEXT NOT NULL DEFAULT '',
+            discussion_topic TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (month, week_number)
         )
         """
     )
+    migrate_monthly_weekly_plan_engagement_sqlite(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS weekly_progress_status (
@@ -208,6 +232,8 @@ def init_db_postgres(conn: psycopg.Connection) -> None:
                 encouragement TEXT NOT NULL,
                 scheduled_date TEXT NOT NULL,
                 sent_at_iso TEXT,
+                quiz_json TEXT NOT NULL DEFAULT '',
+                discussion_topic TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (month, week_number)
             )
             """
@@ -226,6 +252,7 @@ def init_db_postgres(conn: psycopg.Connection) -> None:
             )
             """
         )
+    migrate_monthly_weekly_plan_engagement_postgres(conn)
     conn.commit()
 
 
@@ -351,21 +378,26 @@ def upsert_monthly_weekly_plan_sqlite(
     summary: str,
     encouragement: str,
     scheduled_date: str,
+    quiz_json: str = "",
+    discussion_topic: str = "",
 ) -> None:
     conn.execute(
         """
         INSERT INTO monthly_weekly_plans(
-            month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+            month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso,
+            quiz_json, discussion_topic
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
         ON CONFLICT(month, week_number) DO UPDATE SET
             start_page=excluded.start_page,
             end_page=excluded.end_page,
             summary=excluded.summary,
             encouragement=excluded.encouragement,
-            scheduled_date=excluded.scheduled_date
+            scheduled_date=excluded.scheduled_date,
+            quiz_json=excluded.quiz_json,
+            discussion_topic=excluded.discussion_topic
         """,
-        (month, week_number, start_page, end_page, summary, encouragement, scheduled_date),
+        (month, week_number, start_page, end_page, summary, encouragement, scheduled_date, quiz_json, discussion_topic),
     )
     conn.commit()
 
@@ -380,22 +412,27 @@ def upsert_monthly_weekly_plan_postgres(
     summary: str,
     encouragement: str,
     scheduled_date: str,
+    quiz_json: str = "",
+    discussion_topic: str = "",
 ) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO monthly_weekly_plans(
-                month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+                month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso,
+                quiz_json, discussion_topic
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, NULL)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s)
             ON CONFLICT (month, week_number) DO UPDATE SET
                 start_page=EXCLUDED.start_page,
                 end_page=EXCLUDED.end_page,
                 summary=EXCLUDED.summary,
                 encouragement=EXCLUDED.encouragement,
-                scheduled_date=EXCLUDED.scheduled_date
+                scheduled_date=EXCLUDED.scheduled_date,
+                quiz_json=EXCLUDED.quiz_json,
+                discussion_topic=EXCLUDED.discussion_topic
             """,
-            (month, week_number, start_page, end_page, summary, encouragement, scheduled_date),
+            (month, week_number, start_page, end_page, summary, encouragement, scheduled_date, quiz_json, discussion_topic),
         )
     conn.commit()
 
@@ -403,7 +440,8 @@ def upsert_monthly_weekly_plan_postgres(
 def list_monthly_weekly_plans_sqlite(conn: sqlite3.Connection, *, month: str) -> List[MonthlyWeeklyPlan]:
     rows = conn.execute(
         """
-        SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+        SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso,
+               quiz_json, discussion_topic
         FROM monthly_weekly_plans
         WHERE month = ?
         ORDER BY week_number
@@ -420,6 +458,8 @@ def list_monthly_weekly_plans_sqlite(conn: sqlite3.Connection, *, month: str) ->
             encouragement=str(r["encouragement"]),
             scheduled_date=str(r["scheduled_date"]),
             sent_at_iso=r["sent_at_iso"],
+            quiz_json=str(r["quiz_json"] or ""),
+            discussion_topic=str(r["discussion_topic"] or ""),
         )
         for r in rows
     ]
@@ -429,7 +469,8 @@ def list_monthly_weekly_plans_postgres(conn: psycopg.Connection, *, month: str) 
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+            SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso,
+                   quiz_json, discussion_topic
             FROM monthly_weekly_plans
             WHERE month = %s
             ORDER BY week_number
@@ -447,6 +488,8 @@ def list_monthly_weekly_plans_postgres(conn: psycopg.Connection, *, month: str) 
             encouragement=str(r[5]),
             scheduled_date=str(r[6]),
             sent_at_iso=r[7],
+            quiz_json=str(r[8] or ""),
+            discussion_topic=str(r[9] or ""),
         )
         for r in rows
     ]
@@ -457,7 +500,8 @@ def list_due_unsent_weekly_plans_sqlite(
 ) -> List[MonthlyWeeklyPlan]:
     rows = conn.execute(
         """
-        SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+        SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso,
+               quiz_json, discussion_topic
         FROM monthly_weekly_plans
         WHERE sent_at_iso IS NULL
           AND scheduled_date = ?
@@ -475,6 +519,8 @@ def list_due_unsent_weekly_plans_sqlite(
             encouragement=str(r["encouragement"]),
             scheduled_date=str(r["scheduled_date"]),
             sent_at_iso=r["sent_at_iso"],
+            quiz_json=str(r["quiz_json"] or ""),
+            discussion_topic=str(r["discussion_topic"] or ""),
         )
         for r in rows
     ]
@@ -486,7 +532,8 @@ def list_due_unsent_weekly_plans_postgres(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso
+            SELECT month, week_number, start_page, end_page, summary, encouragement, scheduled_date, sent_at_iso,
+                   quiz_json, discussion_topic
             FROM monthly_weekly_plans
             WHERE sent_at_iso IS NULL
               AND scheduled_date = %s
@@ -505,6 +552,8 @@ def list_due_unsent_weekly_plans_postgres(
             encouragement=str(r[5]),
             scheduled_date=str(r[6]),
             sent_at_iso=r[7],
+            quiz_json=str(r[8] or ""),
+            discussion_topic=str(r[9] or ""),
         )
         for r in rows
     ]

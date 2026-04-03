@@ -14,6 +14,8 @@ class WeeklyCheckConfig:
     next_range_label: str = ""
     summary: str = ""
     encouragement: str = ""
+    discussion_topic: str = ""
+    show_quiz_teaser: bool = False
 
 
 def build_weekly_check_message(cfg: WeeklyCheckConfig) -> Tuple[str, InlineKeyboardMarkup]:
@@ -28,6 +30,11 @@ def build_weekly_check_message(cfg: WeeklyCheckConfig) -> Tuple[str, InlineKeybo
         parts.extend(["", "[이번주 흐름 - 요약]", cfg.summary])
     if cfg.encouragement:
         parts.extend(["", cfg.encouragement])
+    if cfg.show_quiz_teaser:
+        parts.extend(["", "📝 이번 주 미니 퀴즈는 이 메시지 바로 아래 투표(퀴즈)로 올라와요."])
+    disc = (cfg.discussion_topic or "").strip()
+    if disc:
+        parts.extend(["", "💬 모임에서 나눠 볼 주제", disc])
     parts.extend(["", "지난주 범위를 얼마나 읽었는지 선택해주세요."])
     text = "\n".join(parts)
 

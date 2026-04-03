@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections import Counter
@@ -13,7 +14,7 @@ import httpx
 from openai import OpenAI
 from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
 
-from telegram import ChatMember, Update
+from telegram import Bot, ChatMember, Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -293,7 +294,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /book_search: 책 검색 (Google Books) (예: /book_search 아무도 미워하지 않는 자의 죽음)",
             "- /book_select: 검색 결과 중 책 확정 (예: /book_select 1)",
             "- /build_book_summary: 확정된 책 소개를 1~3줄로 요약(선택)",
-            "- /build_month_plan: 모임 날짜 기준 4주 계획 생성",
+            "- /build_month_plan: 모임 날짜 기준 4주 계획 생성(주차별 미니 퀴즈·토론 포함)",
             "- /show_month_plan: 4주 계획 미리보기",
             "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
             "- /set_pages: 총 페이지 수 수동 설정(보정) (예: /set_pages 320)",
@@ -988,7 +989,30 @@ def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: s
     return (resp.choices[0].message.content or "").strip()
 
 
-def _get_openai_weekly_plan_text(
+def _weekly_quiz_json_from_llm_payload(data: dict) -> str:
+    quiz = data.get("quiz")
+    if not isinstance(quiz, dict):
+        return "{}"
+    q = (quiz.get("question") or "").strip()
+    raw_opts = quiz.get("options")
+    if not isinstance(raw_opts, list):
+        return "{}"
+    opts = [str(o).strip()[:100] for o in raw_opts[:4]]
+    if len(opts) != 4 or not all(opts) or len(set(opts)) != 4:
+        return "{}"
+    try:
+        ci = int(quiz.get("correct_index"))
+    except (TypeError, ValueError):
+        return "{}"
+    if ci not in (0, 1, 2, 3):
+        return "{}"
+    expl = (quiz.get("explanation") or "").strip()[:200]
+    q = q[:280]
+    payload = {"question": q, "options": opts, "correct_index": ci, "explanation": expl}
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _get_openai_weekly_plan_bundle(
     api_key: str,
     model: str,
     *,
@@ -999,7 +1023,7 @@ def _get_openai_weekly_plan_text(
     week_number: int,
     start_page: int,
     end_page: int,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str, str]:
     client = OpenAI(api_key=api_key)
     resp = client.chat.completions.create(
         model=model,
@@ -1007,8 +1031,10 @@ def _get_openai_weekly_plan_text(
             {
                 "role": "system",
                 "content": (
-                    "너는 온라인 북클럽 운영진을 돕는 에디터다. 책 소개를 바탕으로 주차별 독서 안내문을 한국어로 만든다. "
-                    "스포일러는 과하지 않게, 흐름과 기대 포인트 중심으로 쓴다."
+                    "너는 온라인 북클럽 운영진을 돕는 에디터다. 책 소개(원문)만 근거로 주차별 콘텐츠를 한국어 JSON으로 만든다. "
+                    "원문에 없는 인물·사건·결말을 지어내지 말고, 추측·상상으로 사실 단정도 하지 않는다. "
+                    "퀴즈는 아주 쉬운 객관식 1문항(보기 4개)으로, 이 주차 페이지를 아직 안 읽어도 부담 없는 수준으로 낸다. "
+                    "토론 주제는 스포일러 없이 생각을 확장하는 질문 한 덩어리로 쓴다."
                 ),
             },
             {
@@ -1019,35 +1045,107 @@ def _get_openai_weekly_plan_text(
                     f"저자: {authors}\n"
                     f"주차: {week_number}주차\n"
                     f"읽을 범위: p.{start_page}-{end_page}\n\n"
-                    f"책 소개:\n{description}\n\n"
-                    "출력 형식:\n"
-                    "SUMMARY:\n"
-                    "3~5줄 요약\n\n"
-                    "ENCOURAGEMENT:\n"
-                    "한 줄 응원 문구\n\n"
-                    "제약:\n"
-                    "- 불릿/번호 금지\n"
-                    "- SUMMARY는 3~5줄\n"
-                    "- ENCOURAGEMENT는 1줄\n"
-                    "- 읽고 싶어지게 만들되 과장 금지\n"
+                    f"책 소개(원문):\n{description}\n\n"
+                    "반드시 아래 키만 갖는 JSON 한 개로만 응답한다(앞뒤 설명 문장 금지).\n"
+                    "{\n"
+                    '  "summary_lines": ["3~5줄 요약, 각 문자열은 한 줄"],\n'
+                    '  "encouragement": "응원 한 줄",\n'
+                    '  "quiz": {\n'
+                    '    "question": "짧은 질문(스포일러 금지)",\n'
+                    '    "options": ["보기1","보기2","보기3","보기4"],\n'
+                    '    "correct_index": 0,\n'
+                    '    "explanation": "정답 후 한 줄 설명(선택, 짧게)"\n'
+                    "  },\n"
+                    '  "discussion": "모임에서 나눌 토론 질문 또는 화두 1~2문장"\n'
+                    "}\n"
+                    "제약: summary_lines는 3~5개 문자열. 보기는 정확히 4개, 서로 다르게. "
+                    "correct_index는 0~3 정수. 질문·보기 각각 과도하게 길지 않게."
                 ),
             },
         ],
-        temperature=0.7,
+        temperature=0.72,
+        max_tokens=1100,
+        response_format={"type": "json_object"},
     )
-    text = (resp.choices[0].message.content or "").strip()
+    raw = (resp.choices[0].message.content or "").strip()
     summary = ""
-    encouragement = ""
-    if "ENCOURAGEMENT:" in text:
-        before, after = text.split("ENCOURAGEMENT:", 1)
-        summary = before.replace("SUMMARY:", "", 1).strip()
-        encouragement = after.strip().splitlines()[0].strip() if after.strip() else ""
-    else:
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        summary = "\n".join(lines[:4])
-        encouragement = lines[4] if len(lines) > 4 else "이번 주는 완독보다 흐름을 따라가는 데 집중해봐요."
-    summary_lines = [ln.strip() for ln in summary.splitlines() if ln.strip()][:5]
-    return "\n".join(summary_lines), encouragement or "이번 주도 한 걸음씩 같이 읽어봐요."
+    encouragement = "이번 주도 한 걸음씩 같이 읽어봐요."
+    discussion = ""
+    quiz_json = "{}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()][:5]
+        summary = "\n".join(lines) if lines else f"p.{start_page}-{end_page} 분량을 여유 있게 읽어 가면 돼요."
+        return summary, encouragement, quiz_json, discussion
+
+    lines_in = data.get("summary_lines")
+    if isinstance(lines_in, list):
+        parts = [str(x).strip() for x in lines_in if str(x).strip()][:5]
+        summary = "\n".join(parts)
+    if not summary.strip():
+        summary = (data.get("summary") or "").strip() or f"p.{start_page}-{end_page} 분량을 여유 있게 읽어 가면 돼요."
+    enc = (data.get("encouragement") or "").strip()
+    if enc:
+        encouragement = enc[:300]
+    discussion = (data.get("discussion") or "").strip()[:800]
+    quiz_json = _weekly_quiz_json_from_llm_payload(data)
+    capped = [ln.strip() for ln in summary.splitlines() if ln.strip()][:5]
+    return "\n".join(capped), encouragement, quiz_json, discussion
+
+
+def _parse_quiz_for_poll(quiz_json: str) -> Optional[Tuple[str, List[str], int, Optional[str]]]:
+    if not quiz_json or quiz_json.strip() in ("", "{}"):
+        return None
+    try:
+        d = json.loads(quiz_json)
+    except json.JSONDecodeError:
+        return None
+    q = (d.get("question") or "").strip()
+    options = d.get("options")
+    if not isinstance(options, list) or len(options) != 4:
+        return None
+    opts = [str(o).strip()[:100] for o in options]
+    if not all(opts):
+        return None
+    try:
+        correct = int(d.get("correct_index"))
+    except (TypeError, ValueError):
+        return None
+    if correct not in (0, 1, 2, 3):
+        return None
+    expl_raw = (d.get("explanation") or "").strip()
+    explanation: Optional[str] = expl_raw[:200] if expl_raw else None
+    return (q, opts, correct, explanation)
+
+
+def _plan_has_valid_quiz(plan: MonthlyWeeklyPlan) -> bool:
+    return _parse_quiz_for_poll(plan.quiz_json) is not None
+
+
+async def _send_weekly_check_and_quiz(bot: Bot, *, chat_id: str, cfg: WeeklyCheckConfig, quiz_json: str) -> None:
+    text, markup = build_weekly_check_message(cfg)
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    parsed = _parse_quiz_for_poll(quiz_json)
+    if not parsed:
+        return
+    q_raw, options, correct_id, explanation = parsed
+    label = f"[{cfg.month} {cfg.week_number}주차] "
+    room = max(24, 300 - len(label))
+    question = label + q_raw[:room]
+    try:
+        await bot.send_poll(
+            chat_id=chat_id,
+            question=question,
+            options=options,
+            type="quiz",
+            correct_option_id=correct_id,
+            is_anonymous=True,
+            allows_multiple_answers=False,
+            explanation=explanation,
+        )
+    except TelegramError:
+        logger.warning("weekly quiz poll failed", exc_info=True)
 
 
 def _build_weekly_page_ranges(total_pages: int) -> List[Tuple[int, int]]:
@@ -1104,8 +1202,9 @@ async def send_due_weekly_checks(app: Application) -> int:
         cfg = _weekly_check_cfg_from_plans(plan.month, plan.week_number, month_plans)
         if cfg is None:
             continue
-        text, markup = build_weekly_check_message(cfg)
-        await app.bot.send_message(chat_id=settings.member_chat_id, text=text, reply_markup=markup)
+        await _send_weekly_check_and_quiz(
+            app.bot, chat_id=settings.member_chat_id, cfg=cfg, quiz_json=plan.quiz_json
+        )
         if is_postgres_url(settings.database_url):
             conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
             try:
@@ -1180,6 +1279,8 @@ def _weekly_check_cfg_from_plans(month: str, week_number: int, plans: List[Month
         next_range_label=(f"p.{next_plan.start_page}-{next_plan.end_page}" if next_plan else ""),
         summary=plan.summary,
         encouragement=encouragement,
+        discussion_topic=plan.discussion_topic or "",
+        show_quiz_teaser=_plan_has_valid_quiz(plan),
     )
 
 
@@ -1335,11 +1436,11 @@ async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYP
     schedule_dates = _build_month_week_schedule(meeting_dt)
 
     try:
-        generated: List[Tuple[str, str]] = []
+        generated: List[Tuple[str, str, str, str]] = []
         for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
             generated.append(
                 await asyncio.to_thread(
-                    _get_openai_weekly_plan_text,
+                    _get_openai_weekly_plan_bundle,
                     settings.openai_api_key,
                     settings.openai_summary_model,
                     title=title,
@@ -1360,7 +1461,7 @@ async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYP
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
             for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
-                summary, encouragement = generated[idx - 1]
+                summary, encouragement, quiz_json, discussion_topic = generated[idx - 1]
                 upsert_monthly_weekly_plan_postgres(
                     conn,
                     month=month,
@@ -1370,6 +1471,8 @@ async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYP
                     summary=summary,
                     encouragement=encouragement,
                     scheduled_date=schedule_dates[idx - 1],
+                    quiz_json=quiz_json,
+                    discussion_topic=discussion_topic,
                 )
         finally:
             conn.close()
@@ -1377,7 +1480,7 @@ async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYP
         conn = connect_sqlite(settings.db_path)
         try:
             for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
-                summary, encouragement = generated[idx - 1]
+                summary, encouragement, quiz_json, discussion_topic = generated[idx - 1]
                 upsert_monthly_weekly_plan_sqlite(
                     conn,
                     month=month,
@@ -1387,13 +1490,15 @@ async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYP
                     summary=summary,
                     encouragement=encouragement,
                     scheduled_date=schedule_dates[idx - 1],
+                    quiz_json=quiz_json,
+                    discussion_topic=discussion_topic,
                 )
         finally:
             conn.close()
 
     _set_month_setting(settings, month=month, key="month_plan_generated_at_iso", value=_now_iso())
 
-    preview_lines = [f"{month} 4주 계획을 저장했어요."]
+    preview_lines = [f"{month} 4주 계획을 저장했어요.", "- 각 주차에 미니 퀴즈(투표)·토론 주제가 함께 들어가요."]
     for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
         preview_lines.append(f"- {idx}주차: p.{start_page}-{end_page} / 시작 {schedule_dates[idx - 1]}")
     await msg.reply_text("\n".join(preview_lines))
@@ -1418,12 +1523,20 @@ async def cmd_show_month_plan(update: Update, context: ContextTypes.DEFAULT_TYPE
         first_line = ""
         if plan.summary:
             first_line = next((ln.strip() for ln in plan.summary.splitlines() if ln.strip()), "")
+        extras: List[str] = []
+        if _plan_has_valid_quiz(plan):
+            extras.append("🧩 미니 퀴즈 1문항(발송 시 채팅에 퀴즈 투표로 올라가요)")
+        disc = (plan.discussion_topic or "").strip()
+        if disc:
+            preview = disc if len(disc) <= 140 else disc[:137] + "…"
+            extras.append(f"💬 토론: {preview}")
         lines.extend(
             [
                 f"━━━━━━━━━━",
                 f"✅ {plan.week_number}주차  ({plan.scheduled_date})",
                 f"📖 범위: p.{plan.start_page}-{plan.end_page}",
                 (f"📝 안내: {first_line}" if first_line else "📝 안내: (요약 없음)"),
+                *extras,
                 "",
             ]
         )
@@ -2698,16 +2811,16 @@ async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
     week_number = 1
     if context.args and context.args[0].isdigit():
         week_number = max(1, min(4, int(context.args[0])))
+    plan_row = next((p for p in plans if p.week_number == week_number), None)
     cfg = _weekly_check_cfg_from_plans(month, week_number, plans)
     if cfg is None:
         await update.message.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
         return
-    text, markup = build_weekly_check_message(cfg)
-
-    await context.bot.send_message(
+    await _send_weekly_check_and_quiz(
+        context.bot,
         chat_id=settings.member_chat_id,
-        text=text,
-        reply_markup=markup,
+        cfg=cfg,
+        quiz_json=(plan_row.quiz_json if plan_row else ""),
     )
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
