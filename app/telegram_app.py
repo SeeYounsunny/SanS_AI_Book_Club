@@ -781,6 +781,14 @@ def _format_month_plan_brief(month: str, plans: List[MonthlyWeeklyPlan]) -> str:
 def _build_mention_keyword_reply(text: str, info: dict, plans: List[MonthlyWeeklyPlan]) -> Optional[str]:
     q = (text or "").strip().lower()
     month = info.get("month") or ""
+    if "취향" in q or "taste" in q:
+        return (
+            "개인 독서 취향은 내 책갈피를 봐야 해서, 봇과의 1:1 대화에서만 분석돼요.\n"
+            "- /taste — 주제별 스냅샷\n"
+            "- /taste_summary — 1~3줄 요약 (책갈피 2개 이상)\n\n"
+            "서버에 EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY 가 함께 있어야 하고,\n"
+            "단톡에서 봇을 멘션하면 북클럽 설정만 전달되고 개인 북마크는 전달되지 않아요."
+        )
     if any(
         k in q
         for k in [
@@ -1736,12 +1744,27 @@ def _cluster_embeddings(vectors: List[List[float]], threshold: float = 0.82) -> 
     return clusters
 
 
+_EMBED_BATCH_SIZE = 16
+_EMBED_MAX_CHARS = 5500
+
+
+def _truncate_for_embedding(text: str, max_chars: int) -> str:
+    s = (text or "").strip()
+    if len(s) <= max_chars:
+        return s
+    return s[: max_chars - 1] + "…"
+
+
 def _get_openai_embeddings(api_key: str, model: str, texts: List[str]) -> List[List[float]]:
+    """Fetch embeddings; truncates long lines and batches requests to reduce OpenAI errors."""
     client = OpenAI(api_key=api_key)
-    resp = client.embeddings.create(model=model, input=texts)
-    # Ensure stable order by index
-    data = sorted(resp.data, key=lambda d: d.index)
-    vectors = [d.embedding for d in data]
+    trimmed = [_truncate_for_embedding(t, _EMBED_MAX_CHARS) for t in texts]
+    vectors: List[List[float]] = []
+    for i in range(0, len(trimmed), _EMBED_BATCH_SIZE):
+        batch = trimmed[i : i + _EMBED_BATCH_SIZE]
+        resp = client.embeddings.create(model=model, input=batch)
+        data = sorted(resp.data, key=lambda d: d.index)
+        vectors.extend([d.embedding for d in data])
     if len(vectors) != len(texts):
         raise TypeError(f"embeddings length mismatch: got {len(vectors)} for {len(texts)} texts")
     return vectors
@@ -1941,6 +1964,8 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text(f"취향 스냅샷 생성에 실패했어요. ({e.__class__.__name__}: {str(e)[:120]})")
         return
 
+    if len(snapshot) > 4000:
+        snapshot = snapshot[:3990] + "…"
     await msg.reply_text(snapshot)
 
 
@@ -1958,7 +1983,9 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if settings.embeddings_provider != "openai" or not settings.openai_api_key:
-        await msg.reply_text("이 기능을 사용하려면 운영진이 OPENAI_API_KEY를 설정해야 해요.")
+        await msg.reply_text(
+            "이 기능을 쓰려면 서버에 EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY 를 함께 설정해야 해요."
+        )
         return
 
     limit = max(3, min(100, int(settings.taste_bookmarks_limit)))
@@ -1992,9 +2019,24 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             settings.openai_embeddings_model,
             texts,
         )
-    except Exception:
+    except AuthenticationError:
+        await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
+        return
+    except RateLimitError:
+        await msg.reply_text("요청이 너무 많아서 잠시 제한됐어요. 잠깐 후 다시 시도해줘요.")
+        return
+    except APIConnectionError:
+        await msg.reply_text("네트워크 문제로 요약 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+    except APIError as e:
+        logger.info("OpenAI APIError while fetching embeddings for taste_summary", exc_info=True)
+        await msg.reply_text(f"OpenAI 오류로 요약 분석을 불러오지 못했어요. ({e.__class__.__name__})")
+        return
+    except Exception as e:
         logger.info("Failed to fetch embeddings for taste_summary", exc_info=True)
-        await msg.reply_text("지금은 요약을 만들기 위한 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
+        await msg.reply_text(
+            f"지금은 요약을 만들기 위한 분석을 불러오지 못했어요. ({e.__class__.__name__})"
+        )
         return
 
     reps = _select_representative_bookmarks(items, embeddings, max_clusters=max_clusters, max_quotes=max_quotes)
@@ -2056,7 +2098,10 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         lines.append(encouragement)
     else:
         lines[-1] = f"{lines[-1]} {encouragement}"
-    await msg.reply_text("\n".join(lines))
+    out = "\n".join(lines)
+    if len(out) > 4000:
+        out = out[:3990] + "…"
+    await msg.reply_text(out)
 
 
 async def cmd_set_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
