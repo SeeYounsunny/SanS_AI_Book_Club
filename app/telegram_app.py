@@ -83,6 +83,39 @@ from app.progress_puzzle import (
 
 logger = logging.getLogger(__name__)
 
+def _norm_flag(s: Optional[str]) -> str:
+    return (s or "").strip().lower()
+
+def _rate_limit_hint(e: Exception) -> str:
+    """
+    Best-effort: OpenAI RateLimitError can mean RPM/TPM throttling OR insufficient quota.
+    We avoid leaking internal details but provide actionable next steps.
+    """
+    msg = (str(e) or "").lower()
+    if "insufficient_quota" in msg or "insufficient quota" in msg or "quota" in msg:
+        return "OpenAI 크레딧/쿼터가 부족한 것 같아요. 결제/한도(Usage/Billing)를 확인해주세요."
+    return "OpenAI 요청이 잠시 몰려 제한됐어요. 20~60초 후 다시 시도해줘요."
+
+
+async def _with_openai_retries(func, *args, **kwargs):
+    """
+    Run a blocking OpenAI call in a thread with a small retry budget for transient 429s.
+    """
+    delays = [2.0, 6.0, 15.0]
+    last_err: Optional[Exception] = None
+    for attempt, d in enumerate([0.0] + delays):
+        if attempt > 0:
+            await asyncio.sleep(d)
+        try:
+            return await asyncio.to_thread(func, *args, **kwargs)
+        except RateLimitError as e:
+            last_err = e
+            continue
+    if last_err is not None:
+        raise last_err
+    # should not happen
+    return await asyncio.to_thread(func, *args, **kwargs)
+
 
 def _default_weekly_check_cfg() -> WeeklyCheckConfig:
     return WeeklyCheckConfig(month=_current_month_yyyy_mm(), week_number=1, range_label="p.1-50")
@@ -1916,7 +1949,9 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("아직 저장된 책갈피가 없어요. 먼저 /bookmark 로 문장을 저장해보세요.")
         return
 
-    if settings.embeddings_provider != "openai" or not settings.openai_api_key:
+    embeddings_provider = _norm_flag(settings.embeddings_provider)
+    openai_key = (settings.openai_api_key or "").strip()
+    if embeddings_provider != "openai" or not openai_key:
         await msg.reply_text(
             "취향 스냅샷(임베딩 기반)을 사용하려면 운영진이 EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY를 설정해야 해요."
         )
@@ -1931,17 +1966,14 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     texts = [b.text for b in items]
     try:
-        embeddings = await asyncio.to_thread(
-            _get_openai_embeddings,
-            settings.openai_api_key,
-            settings.openai_embeddings_model,
-            texts,
+        embeddings = await _with_openai_retries(
+            _get_openai_embeddings, openai_key, settings.openai_embeddings_model, texts
         )
     except AuthenticationError:
         await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
         return
-    except RateLimitError:
-        await msg.reply_text("요청이 너무 많아서 잠시 제한됐어요. 잠깐 후 다시 시도해줘요.")
+    except RateLimitError as e:
+        await msg.reply_text(_rate_limit_hint(e))
         return
     except APIConnectionError:
         await msg.reply_text("네트워크 문제로 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
@@ -1982,7 +2014,9 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if msg is None or user is None:
         return
 
-    if settings.embeddings_provider != "openai" or not settings.openai_api_key:
+    embeddings_provider = _norm_flag(settings.embeddings_provider)
+    openai_key = (settings.openai_api_key or "").strip()
+    if embeddings_provider != "openai" or not openai_key:
         await msg.reply_text(
             "이 기능을 쓰려면 서버에 EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY 를 함께 설정해야 해요."
         )
@@ -2013,17 +2047,14 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     texts = [b.text for b in items]
     try:
-        embeddings = await asyncio.to_thread(
-            _get_openai_embeddings,
-            settings.openai_api_key,
-            settings.openai_embeddings_model,
-            texts,
+        embeddings = await _with_openai_retries(
+            _get_openai_embeddings, openai_key, settings.openai_embeddings_model, texts
         )
     except AuthenticationError:
         await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
         return
-    except RateLimitError:
-        await msg.reply_text("요청이 너무 많아서 잠시 제한됐어요. 잠깐 후 다시 시도해줘요.")
+    except RateLimitError as e:
+        await msg.reply_text(_rate_limit_hint(e))
         return
     except APIConnectionError:
         await msg.reply_text("네트워크 문제로 요약 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
@@ -2060,17 +2091,14 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         prompt = f"[현재 읽는 책: {book_title}]\n" + prompt
 
     try:
-        summary = await asyncio.to_thread(
-            _get_openai_taste_summary,
-            settings.openai_api_key,
-            settings.openai_summary_model,
-            prompt,
+        summary = await _with_openai_retries(
+            _get_openai_taste_summary, openai_key, settings.openai_summary_model, prompt
         )
     except AuthenticationError:
         await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
         return
-    except RateLimitError:
-        await msg.reply_text("요청이 너무 많아서 잠시 제한됐어요. 잠깐 후 다시 시도해줘요.")
+    except RateLimitError as e:
+        await msg.reply_text(_rate_limit_hint(e))
         return
     except APIConnectionError:
         await msg.reply_text("네트워크 문제로 요약을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
@@ -2102,6 +2130,60 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if len(out) > 4000:
         out = out[:3990] + "…"
     await msg.reply_text(out)
+
+
+async def cmd_diag_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only diagnostic for taste pipeline."""
+    if not await _require_private_chat(update):
+        return
+    if not await _require_admin(update, context):
+        return
+
+    msg = update.effective_message
+    user = update.effective_user
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None or user is None:
+        return
+
+    embeddings_provider = _norm_flag(settings.embeddings_provider)
+    has_openai_key = bool((settings.openai_api_key or "").strip())
+
+    is_member = await _is_member_of(settings.member_chat_id, update, context)
+    is_admin = await _is_member_of(settings.admin_chat_id, update, context)
+
+    lines = [
+        "취향 기능 진단 (/taste / /taste_summary)",
+        f"- provider(EMBEDDINGS_PROVIDER): {embeddings_provider or '(empty)'}",
+        f"- has OPENAI_API_KEY: {'yes' if has_openai_key else 'no'}",
+        f"- member chat membership check: {'ok' if is_member else 'fail'}",
+        f"- admin chat membership check: {'ok' if is_admin else 'fail'}",
+    ]
+
+    # Minimal OpenAI smoke test (embeddings + completion) to pinpoint failures.
+    if embeddings_provider == "openai" and has_openai_key:
+        try:
+            _ = await asyncio.to_thread(
+                _get_openai_embeddings,
+                (settings.openai_api_key or "").strip(),
+                settings.openai_embeddings_model,
+                ["diag"],
+            )
+            lines.append("- embeddings call: ok")
+        except Exception as e:
+            lines.append(f"- embeddings call: fail ({e.__class__.__name__})")
+
+        try:
+            text = await asyncio.to_thread(
+                _get_openai_taste_summary,
+                (settings.openai_api_key or "").strip(),
+                settings.openai_summary_model,
+                "- diag",
+            )
+            lines.append(f"- chat completion call: {'ok' if bool((text or '').strip()) else 'empty'}")
+        except Exception as e:
+            lines.append(f"- chat completion call: fail ({e.__class__.__name__})")
+
+    await msg.reply_text("\n".join(lines))
 
 
 async def cmd_set_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2875,6 +2957,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("bookmark_delete", cmd_bookmark_delete))
     app.add_handler(CommandHandler("taste", cmd_taste))
     app.add_handler(CommandHandler("taste_summary", cmd_taste_summary))
+    app.add_handler(CommandHandler("diag_taste", cmd_diag_taste))
     app.add_handler(CommandHandler("set_book", cmd_set_book))
     app.add_handler(CommandHandler("set_meeting", cmd_set_meeting))
     app.add_handler(CommandHandler("set_pages", cmd_set_pages))
