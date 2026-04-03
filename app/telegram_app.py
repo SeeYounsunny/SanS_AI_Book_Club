@@ -295,7 +295,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /book_select: 검색 결과 중 책 확정 (예: /book_select 1)",
             "- /build_book_summary: 확정된 책 소개를 1~3줄로 요약(선택)",
             "- /build_month_plan: 모임 날짜 기준 4주 계획 생성(주차별 미니 퀴즈·토론 포함)",
-            "- /show_month_plan: 4주 계획 미리보기",
+            "- /show_month_plan: 4주 계획(운영진은 퀴즈·토론 미리보기 포함)",
             "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
             "- /set_pages: 총 페이지 수 수동 설정(보정) (예: /set_pages 320)",
             "- /show_book: (기준 월) 책/모임 일정 확인",
@@ -1511,6 +1511,7 @@ async def cmd_show_month_plan(update: Update, context: ContextTypes.DEFAULT_TYPE
     settings: Settings = context.application.bot_data["settings"]
     if msg is None:
         return
+    is_admin = await _is_member_of(settings.admin_chat_id, update, context)
     info = _load_club_book_info(settings)
     month = info.get("month") or _get_active_month(settings)
     page_count_raw = (info.get("page_count") or "").strip()
@@ -1519,17 +1520,21 @@ async def cmd_show_month_plan(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.reply_text("아직 4주 계획이 없어요. 운영진이 /build_month_plan 을 먼저 실행해줘요.")
         return
     lines = [f"📘 {month} 4주 읽기 계획", ""]
+    if not is_admin:
+        lines.append("(주차별 미니 퀴즈·토론은 해당 주 시작일에 단체방에서 공개돼요.)")
+        lines.append("")
     for plan in plans:
         first_line = ""
         if plan.summary:
             first_line = next((ln.strip() for ln in plan.summary.splitlines() if ln.strip()), "")
         extras: List[str] = []
-        if _plan_has_valid_quiz(plan):
-            extras.append("🧩 미니 퀴즈 1문항(발송 시 채팅에 퀴즈 투표로 올라가요)")
-        disc = (plan.discussion_topic or "").strip()
-        if disc:
-            preview = disc if len(disc) <= 140 else disc[:137] + "…"
-            extras.append(f"💬 토론: {preview}")
+        if is_admin:
+            if _plan_has_valid_quiz(plan):
+                extras.append("🧩 미니 퀴즈 1문항(발송 시 채팅에 퀴즈 투표로 올라가요)")
+            disc = (plan.discussion_topic or "").strip()
+            if disc:
+                preview = disc if len(disc) <= 140 else disc[:137] + "…"
+                extras.append(f"💬 토론: {preview}")
         lines.extend(
             [
                 f"━━━━━━━━━━",
