@@ -258,9 +258,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /weekly_stats [주차]: 주차별 응답 통계",
             "- /weekly_stats_detail [주차]: 주차별 멤버 상태 상세",
             "- /share_weekly_stats [주차]: 주차별 통계를 단체방에 공유",
-            "- /taste_member: 특정 멤버 취향 스냅샷 보기 (예: /taste_member @username 또는 /taste_member 123456789)",
-            "- /club_taste: 북클럽 전체 취향 스냅샷(종합)",
-            "- /taste_summary: (멤버 1:1) 취향 요약 1~3줄 (LLM)",
             "",
             "빠른 시작",
             "1) 봇을 독서모임 그룹에 초대",
@@ -310,10 +307,6 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- 보기: /bookmarks",
             "- 수정: /bookmark_edit #id 수정할 문장",
             "- 삭제: /bookmark_delete #id",
-            "",
-            "취향 스냅샷 — 1:1 대화에서만",
-            "- /taste",
-            "- /taste_summary",
         ]
     )
 
@@ -336,7 +329,6 @@ async def cmd_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "- ✅ 진도 체크: 매주 올라오는 진도 체크에 버튼으로 응답해요.",
             "- 🔖 북마크: 읽다가 마음에 든 문장을 책갈피처럼 저장해요.",
-            "- 🧭 취향 요약: 저장한 문장을 바탕으로 내 독서 취향을 조금씩 알아가요. (/taste, 베타)",
             "",
             "사용법은 /guide 를 참고해주세요.",
         ]
@@ -815,13 +807,7 @@ def _build_mention_keyword_reply(text: str, info: dict, plans: List[MonthlyWeekl
     q = (text or "").strip().lower()
     month = info.get("month") or ""
     if "취향" in q or "taste" in q:
-        return (
-            "개인 독서 취향은 내 책갈피를 봐야 해서, 봇과의 1:1 대화에서만 분석돼요.\n"
-            "- /taste — 주제별 스냅샷\n"
-            "- /taste_summary — 1~3줄 요약 (책갈피 2개 이상)\n\n"
-            "서버에 EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY 가 함께 있어야 하고,\n"
-            "단톡에서 봇을 멘션하면 북클럽 설정만 전달되고 개인 북마크는 전달되지 않아요."
-        )
+        return "취향 분석 기능은 현재 운영진만 사용할 수 있어요."
     if any(
         k in q
         for k in [
@@ -1916,10 +1902,10 @@ def _get_openai_taste_summary(api_key: str, model: str, prompt: str) -> str:
 
 
 async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Member-facing "taste snapshot" based on their bookmarks.
+    # Admin-only "taste snapshot" based on their bookmarks.
     if not await _require_private_chat(update):
         return
-    if not await _require_member(update, context):
+    if not await _require_admin(update, context):
         return
 
     msg = update.effective_message
@@ -2002,10 +1988,10 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Member-facing 1~3 line summary (LLM) based on representative bookmarks.
+    # Admin-only 1~3 line summary (LLM) based on representative bookmarks.
     if not await _require_private_chat(update):
         return
-    if not await _require_member(update, context):
+    if not await _require_admin(update, context):
         return
 
     msg = update.effective_message
