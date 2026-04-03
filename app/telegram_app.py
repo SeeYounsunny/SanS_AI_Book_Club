@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections import Counter
 from datetime import datetime
+from io import BytesIO
 from typing import List, Optional, Tuple
 
 import httpx
@@ -73,6 +74,12 @@ from app.db import (
     upsert_weekly_progress_status_sqlite,
 )
 from app.reading_check import WeeklyCheckConfig, build_weekly_check_message
+from app.progress_puzzle import (
+    calculate_progress_percent,
+    calculate_revealed_tiles,
+    render_image_puzzle,
+    render_text_grid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +220,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
             "- /set_pages: 총 페이지 수 수동 설정(보정) (예: /set_pages 320)",
             "- /show_book: (기준 월) 책/모임 일정 확인",
+            "- /set_puzzle_cover: 사진 메시지에 답장해 퍼즐 대표 이미지 저장",
+            "- /show_puzzle <읽은페이지>: 랜덤 퍼즐 미리보기 (운영진 테스트)",
             "- /weekly_stats [주차]: 주차별 응답 통계",
             "- /weekly_stats_detail [주차]: 주차별 멤버 상태 상세",
             "- /share_weekly_stats [주차]: 주차별 통계를 단체방에 공유",
@@ -398,6 +407,44 @@ async def cmd_set_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     _set_active_month(settings, month)
     await msg.reply_text(f"기준 월을 설정했어요: {month}")
+
+
+def _load_month_puzzle_meta(settings: Settings, *, month: str) -> Tuple[Optional[str], Optional[int]]:
+    file_id: Optional[str] = None
+    seed_raw: Optional[str] = None
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            file_id = get_month_setting_postgres(conn, month=month, key="puzzle_cover_file_id")
+            seed_raw = get_month_setting_postgres(conn, month=month, key="puzzle_seed")
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            file_id = get_month_setting_sqlite(conn, month=month, key="puzzle_cover_file_id")
+            seed_raw = get_month_setting_sqlite(conn, month=month, key="puzzle_seed")
+        finally:
+            conn.close()
+    seed = int(seed_raw) if seed_raw and seed_raw.isdigit() else None
+    return file_id, seed
+
+
+def _save_month_puzzle_meta(settings: Settings, *, month: str, file_id: str, seed: int) -> None:
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            set_month_setting_postgres(conn, month=month, key="puzzle_cover_file_id", value=file_id)
+            set_month_setting_postgres(conn, month=month, key="puzzle_seed", value=str(seed))
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            set_month_setting_sqlite(conn, month=month, key="puzzle_cover_file_id", value=file_id)
+            set_month_setting_sqlite(conn, month=month, key="puzzle_seed", value=str(seed))
+        finally:
+            conn.close()
 
 
 def _truncate(s: str, *, max_len: int) -> str:
@@ -1261,6 +1308,97 @@ async def cmd_book_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     info = _load_club_book_info(settings, month=month)
     await msg.reply_text(_format_book_info_message(info))
+
+
+async def cmd_set_puzzle_cover(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    if not settings.progress_game_enabled:
+        await msg.reply_text("퍼즐 기능이 비활성화되어 있어요. PROGRESS_GAME_ENABLED=true 로 켜주세요.")
+        return
+
+    reply = getattr(msg, "reply_to_message", None)
+    photos = getattr(reply, "photo", None) if reply else None
+    if not photos:
+        await msg.reply_text("사용법: 대표 이미지가 있는 사진 메시지에 답장한 뒤 /set_puzzle_cover 를 실행해줘요.")
+        return
+
+    month = _get_active_month(settings)
+    largest = photos[-1]
+    file_id = getattr(largest, "file_id", None)
+    if not file_id:
+        await msg.reply_text("대표 이미지 저장에 실패했어요. 다른 사진으로 다시 시도해줘요.")
+        return
+
+    seed = int(datetime.utcnow().timestamp())
+    _save_month_puzzle_meta(settings, month=month, file_id=file_id, seed=seed)
+    await msg.reply_text(f"{month} 퍼즐 대표 이미지를 저장했어요.")
+
+
+async def cmd_show_puzzle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+    if not settings.progress_game_enabled:
+        await msg.reply_text("퍼즐 기능이 비활성화되어 있어요. PROGRESS_GAME_ENABLED=true 로 켜주세요.")
+        return
+
+    month = _get_active_month(settings)
+    info = _load_club_book_info(settings, month=month)
+    page_count_raw = (info.get("page_count") or "").strip()
+    if not page_count_raw.isdigit():
+        await msg.reply_text("총 페이지 수가 아직 없어요. /set_pages 로 먼저 설정해줘요.")
+        return
+    total_pages = int(page_count_raw)
+    if not context.args or not context.args[0].isdigit():
+        await msg.reply_text("사용법: /show_puzzle <읽은페이지>\n예) /show_puzzle 120")
+        return
+    pages_read = int(context.args[0])
+    percent = calculate_progress_percent(pages_read=pages_read, total_pages=total_pages)
+    revealed = calculate_revealed_tiles(progress_percent=percent, total_tiles=settings.progress_game_grid_size)
+
+    file_id, seed = _load_month_puzzle_meta(settings, month=month)
+    text_grid = render_text_grid(revealed_tiles=revealed, total_tiles=settings.progress_game_grid_size, cols=10)
+    caption = "\n".join(
+        [
+            f"{month} 퍼즐 진행도",
+            f"- 책: {info.get('title') or '(미설정)'}",
+            f"- 읽은 페이지: {pages_read}/{total_pages}p ({percent}%)",
+            f"- 공개 칸: {revealed}/{settings.progress_game_grid_size}",
+            "",
+            text_grid,
+        ]
+    )
+    if not file_id or seed is None:
+        await msg.reply_text(caption + "\n\n대표 이미지가 아직 없어요. 사진에 답장한 뒤 /set_puzzle_cover 를 실행해줘요.")
+        return
+
+    try:
+        telegram_file = await context.bot.get_file(file_id)
+        image_bytes = bytes(await telegram_file.download_as_bytearray())
+        puzzle_bytes = render_image_puzzle(
+            image_bytes=image_bytes,
+            revealed_tiles=revealed,
+            total_tiles=settings.progress_game_grid_size,
+            seed=seed,
+        )
+    except Exception:
+        logger.info("Failed to render puzzle image", exc_info=True)
+        await msg.reply_text(caption + "\n\n이미지 퍼즐 생성에 실패해서 텍스트 퍼즐만 보여줘요.")
+        return
+
+    await context.bot.send_photo(
+        chat_id=msg.chat_id,
+        photo=BytesIO(puzzle_bytes),
+        caption=caption,
+    )
 
 
 async def cmd_send_book_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2696,6 +2834,8 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("set_meeting", cmd_set_meeting))
     app.add_handler(CommandHandler("set_pages", cmd_set_pages))
     app.add_handler(CommandHandler("show_book", cmd_show_book))
+    app.add_handler(CommandHandler("set_puzzle_cover", cmd_set_puzzle_cover))
+    app.add_handler(CommandHandler("show_puzzle", cmd_show_puzzle))
     app.add_handler(CommandHandler("taste_member", cmd_taste_member))
     app.add_handler(CommandHandler("club_taste", cmd_club_taste))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
