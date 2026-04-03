@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import Counter
 from datetime import datetime
 from io import BytesIO
@@ -923,6 +924,26 @@ def _get_openai_mention_answer(
     return (resp.choices[0].message.content or "").strip()
 
 
+_BRACKET_SECTION_LINE = re.compile(r"^【[^】]+】\s*$")
+
+
+def _normalize_book_summary_copy(text: str) -> str:
+    """Strip accidental section labels / list markers if the model ignores prompt rules."""
+    out: list[str] = []
+    for raw in text.splitlines():
+        st = raw.strip()
+        if _BRACKET_SECTION_LINE.match(st):
+            continue
+        if st.startswith("- "):
+            indent = raw[: len(raw) - len(raw.lstrip())]
+            raw = indent + st[2:].lstrip()
+        out.append(raw.rstrip())
+    s = "\n".join(out).strip()
+    while "\n\n\n" in s:
+        s = s.replace("\n\n\n", "\n\n")
+    return s
+
+
 def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: str, description: str) -> str:
     client = OpenAI(api_key=api_key)
     resp = client.chat.completions.create(
@@ -932,9 +953,9 @@ def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: s
                 "role": "system",
                 "content": (
                     "너는 한국어 출판/온라인 서점에서 책을 파는 시니어 북 마케터이자 카피라이터다. "
-                    "목표는 제공된 책 소개문(원문)만 근거로, 독자가 ‘이 책을 펼쳐보고 싶다’는 감정이 "
-                    "즉시 생기게 만드는 소개 카피를 쓰는 것이다. 사실은 지키되, 문장은 문학적·감각적으로 다듬는다. "
-                    "실제 인물의 추천사/인용문을 지어내지 않는다(가짜 서평·가짜 언론사 인용 금지)."
+                    "제공된 책 소개문(원문)만 근거로, 독자가 이 글을 읽는 순간 ‘지금 당장 서점에 가서 사거나, "
+                    "집에서 바로 책장에서 꺼내 펼치고 싶다’는 충동이 들게 써라. "
+                    "사실은 지키되 문장은 감각적이고 밀도 있게. 가짜 서평·가짜 언론/유명인 인용·허위 사실은 금지."
                 ),
             },
             {
@@ -943,33 +964,26 @@ def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: s
                     f"책 제목: {title}\n"
                     f"저자: {authors}\n\n"
                     f"책 소개(원문, 이것만 근거):\n{description}\n\n"
-                    "아래 형식으로 한국어 카피를 써라. 줄바꿈은 정확히 이 구조를 따른다(괄호 라벨 포함).\n"
-                    "\n"
-                    "【표지 한 줄】\n"
-                    "- 책 표지에 박을 수 있는 한 줄 훅. 임팩트 있게. (1문장)\n"
-                    "\n"
-                    "【서점 상세 설명】\n"
-                    "- 교보문고/YES24 상품 상세 상단에 붙는 설명처럼, 3~5문장으로 촘촘하게.\n"
-                    "- 이 책이 다루는 핵심 갈등/질문, 읽는 동안의 분위기, 독자가 얻는 통찰을 구체적으로.\n"
-                    "- ‘혁신/선두주자/탐구합니다’ 같은 공허한 PR 남발 금지. 같은 주어로 문장을 반복하지 말 것.\n"
-                    "\n"
-                    "【추천사 톤】\n"
-                    "- 실제 사람 이름·매체·인용부호로 추천사를 만들지 말 것.\n"
-                    "- 대신 ‘추천사에 나올 법한’ 2~3문장: 독자의 입에서 나올 법한 감탄/권유 톤으로.\n"
-                    "\n"
-                    "【북클럽 한 줄】\n"
-                    "- 북클럽에서 같이 읽자는 따뜻한 초대 1문장.\n"
-                    "\n"
-                    "전체 제약:\n"
-                    "- 총 문장 수는 대략 10~14문장(너무 짧지 않게).\n"
-                    "- 이모지는 쓰지 않는다(깔끔한 출판 카피).\n"
-                    "- 번호 목록/불릿/마크다운 헤더(### 등) 금지. 위 【】 라벨 줄만 허용.\n"
+                    "출력은 ‘하나의 자연스러운 책 추천 글’이어야 한다. 아래 요소를 섹션 제목 없이 한 흐름으로 녹여내라.\n"
+                    "(표지에 박을 법한 첫인상의 훅 + 온라인 서점 상세설명처럼 구체적인 매력 + 추천사에 나올 법한 "
+                    "따뜻한 설득 + 북클럽에서 같이 읽자는 가벼운 초대)\n\n"
+                    "형식 규칙:\n"
+                    "- 한국어만. 이모지 금지.\n"
+                    "- 【】, ‘표지/서점/추천사’ 같은 라벨·소제목·구역 나누기 금지.\n"
+                    "- 줄 맨앞의 하이픈 불릿, 1. 2. 같은 번호 목록 금지.\n"
+                    "- 문단은 2~4개 정도로 나눠도 좋다(빈 줄로만 구분). 각 문단 안에서는 문장이 리듬감 있게 이어지게.\n"
+                    "- 전체 분량: 대략 12~20문장(짧은 카피가 아니라 ‘읽을 만한’ 길이).\n"
+                    "- 독자를 끌어당기는 짧은 핵심 코멘트를 큰따옴표로 1~2줄 넣어도 좋다. "
+                    "단, 누가 말했다는 식의 가짜 화자·이름·직함·매체는 붙이지 말 것.\n"
+                    "- ‘혁신의 아이콘/선두주자/탐구합니다/여정을 그려냅니다’ 같은 공허한 PR 남발과 "
+                    "같은 주어로 시작하는 문장 연속 반복을 피할 것.\n"
+                    "- 책 제목은 과하게 반복하지 말 것(필요할 때만).\n"
                     "- 질문으로 끝내지 말 것.\n"
                 ),
             },
         ],
         temperature=0.92,
-        max_tokens=900,
+        max_tokens=1100,
     )
     return (resp.choices[0].message.content or "").strip()
 
@@ -1244,7 +1258,8 @@ async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_T
     if not summary:
         await msg.reply_text("요약 결과가 비어있어요. 잠시 후 다시 시도해줘요.")
         return
-    # 카피는 【】 섹션 구조라 줄 수 제한으로 잘리지 않게 길이만 완화 제한
+    # 카피는 한 덩어리 서술형이라 줄 수 제한으로 잘리지 않게 길이만 완화 제한
+    summary = _normalize_book_summary_copy(summary)
     summary = "\n".join(ln.rstrip() for ln in summary.splitlines()).strip()
     if len(summary) > 3200:
         summary = summary[:3190] + "…"
@@ -2358,7 +2373,7 @@ async def cmd_show_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await msg.reply_text(
         "\n".join(
             [
-                "📚 책/모임 설정",
+                "📚 이달의 책 안내",
                 f"🗓️ 기준 월: {month}",
                 f"📖 책 제목: {title}",
                 f"📅 모임 일정: {meeting_at}",
