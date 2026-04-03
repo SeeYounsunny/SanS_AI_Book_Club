@@ -819,23 +819,23 @@ def _format_book_info_message(info: dict, *, include_description: bool = True) -
     meta = " / ".join(meta_parts).strip()
 
     lines = [
-        "이달의 책 정보" + (f" ({month})" if month else ""),
+        "📚 이달의 책 정보" + (f" ({month})" if month else ""),
         "",
-        f"- 제목: {title}",
-        f"- 저자: {authors}",
-        f"- 총 페이지: {page_count}",
-        f"- 모임 일정: {meeting_at}",
+        f"📖 책 제목: {title}",
+        f"✍️ 저자: {authors}",
+        f"📄 총 페이지: {page_count}",
+        f"📅 모임 일정: {meeting_at}",
     ]
     if meta:
-        lines.append(f"- 출판 정보: {meta}")
+        lines.append(f"🏷️ 출판 정보: {meta}")
     if isbn:
-        lines.append(f"- ISBN: {isbn}")
+        lines.append(f"🔢 ISBN: {isbn}")
     if info_link:
-        lines.append(f"- 링크: {info_link}")
+        lines.append(f"🔗 링크: {info_link}")
     if summary:
-        lines.extend(["", "요약", summary])
+        lines.extend(["", "✨ 책 소개 요약", summary])
     elif include_description and description:
-        lines.extend(["", "소개", _truncate(description, max_len=700)])
+        lines.extend(["", "📌 소개", _truncate(description, max_len=700)])
     return "\n".join(lines)
 
 
@@ -931,9 +931,9 @@ def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: s
             {
                 "role": "system",
                 "content": (
-                    "너는 온라인 북클럽 운영진의 카피라이터이자 에디터다. 목표는 멤버가 이 책을 "
-                    "'읽어보고 싶다'고 느끼게 만드는 것이다. 책 소개문을 바탕으로 북클럽 공지에 실을 "
-                    "세련되고 흥미로운 한국어 소개문을 쓴다."
+                    "너는 온라인 북클럽 운영진의 책 마케터이자 카피라이터다. 목표는 독자가 "
+                    "'지금 당장 읽어보고 싶다'고 느끼게 만드는 것이다. 제공된 책 소개문만 근거로 "
+                    "세련되고 읽기 쉬운 한국어 소개문을 쓴다."
                 ),
             },
             {
@@ -943,14 +943,16 @@ def _get_openai_book_summary(api_key: str, model: str, *, title: str, authors: s
                     f"저자: {authors}\n\n"
                     f"책 소개(원문):\n{description}\n\n"
                     "요청:\n"
-                    "- 한국어로 3~4줄(줄바꿈 포함)\n"
+                    "- 한국어로 8~10줄(줄바꿈 포함)\n"
+                    "- 각 줄은 1문장 내외로 짧고 또렷하게\n"
+                    "- 가독성 좋게: 줄 앞에 이모지 0~1개는 허용(과하게 남발 금지)\n"
                     "- 질문 금지\n"
                     "- 과장 금지(허위/과대 금지), 단정적 평가 금지\n"
                     "- '어떤 책인지'와 '왜 읽고 싶은지'가 바로 느껴지게\n"
-                    "- 책의 핵심 문제의식, 분위기, 기대 포인트를 균형 있게 담기\n"
+                    "- 책의 핵심 문제의식, 분위기, 기대 포인트를 균형 있게(각각 최소 1줄은 담기)\n"
                     "- 단순 줄거리 요약보다 독자가 끌릴 만한 맥락을 살리기\n"
-                    "- 마지막 줄은 북클럽 멤버에게 건네는 짧은 독려/초대 문장\n"
-                    "- 불릿/번호/이모지 금지\n"
+                    "- 마지막 1~2줄은 북클럽 멤버에게 건네는 짧은 독려/초대 문장\n"
+                    "- '1) 2) -' 같은 번호/불릿 목록은 금지(그냥 줄바꿈으로만)\n"
                     "- 문장은 자연스럽고 세련되게, 너무 광고 문구처럼 과장하지 말 것\n"
                 ),
             },
@@ -1230,15 +1232,16 @@ async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_T
     if not summary:
         await msg.reply_text("요약 결과가 비어있어요. 잠시 후 다시 시도해줘요.")
         return
-    # Soft-enforce 3~4 lines
+    # Soft-enforce 8~10 lines (readable in Telegram)
     lines = [ln.strip() for ln in summary.splitlines() if ln.strip()]
-    if len(lines) < 3:
+    if len(lines) < 8:
         filler = [
-            "이번 달 북클럽에서 함께 읽으며 각자 다르게 남는 지점을 이야기해봐도 좋겠어요.",
-            "이번 모임에서 같이 읽고 이야기 나누면 더 재미있을 책이에요.",
+            "📚 이번 달엔 이 책으로, 각자 마음에 걸리는 문장을 모아 같이 이야기해봐요.",
+            "💬 읽는 속도보다 ‘남는 포인트’를 챙기는 쪽으로 가볍게 시작해도 좋아요.",
+            "✨ 마음에 닿는 문장을 책갈피로 남겨두면, 모임에서 대화가 더 깊어져요.",
         ]
-        lines = (lines + filler)[:3]
-    lines = lines[:4]
+        lines = (lines + filler)[:8]
+    lines = lines[:10]
     summary = "\n".join(lines)
 
     _set_month_setting(settings, month=month, key="book_summary", value=summary)
