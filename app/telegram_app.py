@@ -288,6 +288,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 MEMBER_CHAT_ID/ADMIN_CHAT_ID 설정용)",
             "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
+            "- /send_weekly_quiz [주차]: (운영진) 해당 주차 미니 퀴즈(투표) 전송",
+            "- /send_weekly_topic [주차]: (운영진) 해당 주차 토론 주제 전송",
             "- /set_book: 현재 책 제목 설정 (예: /set_book 아무도 미워하지 않는 자의 죽음)",
             "- /set_meeting: 모임 일정 설정 (예: /set_meeting 2026-04-10 또는 /set_meeting 2026-04-10 20:00)",
             "- /set_month: 설정/조회 기준 월 설정 (예: /set_month 2026-04)",
@@ -1148,6 +1150,21 @@ async def _send_weekly_check_and_quiz(bot: Bot, *, chat_id: str, cfg: WeeklyChec
         logger.warning("weekly quiz poll failed", exc_info=True)
 
 
+async def _send_weekly_check_only(bot: Bot, *, chat_id: str, cfg: WeeklyCheckConfig) -> None:
+    safe_cfg = WeeklyCheckConfig(
+        month=cfg.month,
+        week_number=cfg.week_number,
+        range_label=cfg.range_label,
+        next_range_label=cfg.next_range_label,
+        summary=cfg.summary,
+        encouragement=cfg.encouragement,
+        discussion_topic="",
+        show_quiz_teaser=False,
+    )
+    text, markup = build_weekly_check_message(safe_cfg)
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+
+
 def _build_weekly_page_ranges(total_pages: int) -> List[Tuple[int, int]]:
     base = total_pages // 4
     remainder = total_pages % 4
@@ -1202,9 +1219,8 @@ async def send_due_weekly_checks(app: Application) -> int:
         cfg = _weekly_check_cfg_from_plans(plan.month, plan.week_number, month_plans)
         if cfg is None:
             continue
-        await _send_weekly_check_and_quiz(
-            app.bot, chat_id=settings.member_chat_id, cfg=cfg, quiz_json=plan.quiz_json
-        )
+        # 자동 발송은 '진도 체크'만. 퀴즈/토론은 운영진이 필요할 때 별도 전송.
+        await _send_weekly_check_only(app.bot, chat_id=settings.member_chat_id, cfg=cfg)
         if is_postgres_url(settings.database_url):
             conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
             try:
@@ -2816,17 +2832,11 @@ async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
     week_number = 1
     if context.args and context.args[0].isdigit():
         week_number = max(1, min(4, int(context.args[0])))
-    plan_row = next((p for p in plans if p.week_number == week_number), None)
     cfg = _weekly_check_cfg_from_plans(month, week_number, plans)
     if cfg is None:
         await update.message.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
         return
-    await _send_weekly_check_and_quiz(
-        context.bot,
-        chat_id=settings.member_chat_id,
-        cfg=cfg,
-        quiz_json=(plan_row.quiz_json if plan_row else ""),
-    )
+    await _send_weekly_check_only(context.bot, chat_id=settings.member_chat_id, cfg=cfg)
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
@@ -2840,6 +2850,52 @@ async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
         finally:
             conn.close()
     await update.message.reply_text(f"{month} {week_number}주차 진도 체크 메시지를 전송했어요.")
+
+
+async def cmd_send_weekly_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.application.bot_data["settings"]
+    if not await _require_admin(update, context):
+        return
+    info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    week_number = 1
+    if context.args and context.args[0].isdigit():
+        week_number = max(1, min(4, int(context.args[0])))
+    plan = next((p for p in plans if p.week_number == week_number), None)
+    cfg = _weekly_check_cfg_from_plans(month, week_number, plans)
+    if plan is None or cfg is None:
+        await update.message.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
+        return
+    if not _plan_has_valid_quiz(plan):
+        await update.message.reply_text("저장된 미니 퀴즈가 없어요. /build_month_plan force 로 다시 생성해줘요.")
+        return
+    await _send_weekly_check_and_quiz(context.bot, chat_id=settings.member_chat_id, cfg=cfg, quiz_json=plan.quiz_json)
+    await update.message.reply_text(f"{month} {week_number}주차 미니 퀴즈(투표)를 전송했어요.")
+
+
+async def cmd_send_weekly_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.application.bot_data["settings"]
+    if not await _require_admin(update, context):
+        return
+    info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    week_number = 1
+    if context.args and context.args[0].isdigit():
+        week_number = max(1, min(4, int(context.args[0])))
+    plan = next((p for p in plans if p.week_number == week_number), None)
+    if plan is None:
+        await update.message.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
+        return
+    topic = (plan.discussion_topic or "").strip()
+    if not topic:
+        await update.message.reply_text("저장된 토론 주제가 없어요. /build_month_plan force 로 다시 생성해줘요.")
+        return
+    await context.bot.send_message(
+        chat_id=settings.member_chat_id, text=f"{month} {week_number}주차 토론 주제\n\n{topic}"
+    )
+    await update.message.reply_text(f"{month} {week_number}주차 토론 주제를 전송했어요.")
 
 
 async def cmd_weekly_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3180,6 +3236,8 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("club_taste", cmd_club_taste))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
+    app.add_handler(CommandHandler("send_weekly_quiz", cmd_send_weekly_quiz))
+    app.add_handler(CommandHandler("send_weekly_topic", cmd_send_weekly_topic))
     app.add_handler(CommandHandler("book_search", cmd_book_search))
     app.add_handler(CommandHandler("book_select", cmd_book_select))
     app.add_handler(CommandHandler("build_book_summary", cmd_build_book_summary))
