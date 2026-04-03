@@ -290,6 +290,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
             "- /send_weekly_quiz [주차]: (운영진) 해당 주차 미니 퀴즈(투표) 전송",
             "- /send_weekly_topic [주차]: (운영진) 해당 주차 토론 주제 전송",
+            "- /preview_weekly [주차]: (운영진) 저장된 해당 주차 요약·퀴즈·토론 미리보기",
+            "- /rebuild_weekly [주차]: (운영진) 해당 주만 OpenAI로 다시 생성·저장 후 미리보기",
             "- /set_book: 현재 책 제목 설정 (예: /set_book 아무도 미워하지 않는 자의 죽음)",
             "- /set_meeting: 모임 일정 설정 (예: /set_meeting 2026-04-10 또는 /set_meeting 2026-04-10 20:00)",
             "- /set_month: 설정/조회 기준 월 설정 (예: /set_month 2026-04)",
@@ -1163,6 +1165,61 @@ async def _send_weekly_check_only(bot: Bot, *, chat_id: str, cfg: WeeklyCheckCon
     )
     text, markup = build_weekly_check_message(safe_cfg)
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+
+
+def _chunk_text_for_telegram(text: str, limit: int = 3900) -> List[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    chunks: List[str] = []
+    rest = text
+    while rest:
+        if len(rest) <= limit:
+            chunks.append(rest)
+            break
+        cut = rest.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    return chunks
+
+
+def _format_weekly_engagement_preview(plan: MonthlyWeeklyPlan) -> str:
+    lines = [
+        f"📋 {plan.month} {plan.week_number}주차 콘텐츠 (저장본 미리보기)",
+        f"- 시작일(스케줄): {plan.scheduled_date}",
+        f"- 읽기 범위: p.{plan.start_page}-{plan.end_page}",
+        "",
+        "━━ 요약 ━━",
+        plan.summary.strip() or "(없음)",
+        "",
+        "━━ 응원 한 줄 ━━",
+        plan.encouragement.strip() or "(없음)",
+        "",
+        "━━ 미니 퀴즈 ━━",
+    ]
+    parsed = _parse_quiz_for_poll(plan.quiz_json)
+    if not parsed:
+        lines.append("(유효한 퀴즈 없음 — /rebuild_weekly 로 다시 만들 수 있어요)")
+    else:
+        q, opts, correct_id, expl = parsed
+        lines.append(f"질문: {q}")
+        for i, o in enumerate(opts):
+            mark = " ← 정답" if i == correct_id else ""
+            lines.append(f"  {i + 1}) {o}{mark}")
+        if expl:
+            lines.extend(["", f"해설: {expl}"])
+    lines.extend(["", "━━ 토론 주제 ━━", (plan.discussion_topic or "").strip() or "(없음)"])
+    lines.extend(
+        [
+            "",
+            "마음에 들면 /send_weekly_quiz 또는 /send_weekly_topic 으로 멤버방에 보내세요.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _build_weekly_page_ranges(total_pages: int) -> List[Tuple[int, int]]:
@@ -2898,6 +2955,131 @@ async def cmd_send_weekly_topic(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(f"{month} {week_number}주차 토론 주제를 전송했어요.")
 
 
+async def cmd_preview_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.application.bot_data["settings"]
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+    week_number = 1
+    if context.args and context.args[0].isdigit():
+        week_number = max(1, min(4, int(context.args[0])))
+    info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    plan = next((p for p in plans if p.week_number == week_number), None)
+    if plan is None:
+        await msg.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
+        return
+    body = _format_weekly_engagement_preview(plan)
+    for chunk in _chunk_text_for_telegram(body):
+        await msg.reply_text(chunk)
+
+
+async def cmd_rebuild_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.application.bot_data["settings"]
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+    if not settings.openai_api_key:
+        await msg.reply_text("이 기능을 사용하려면 운영진이 OPENAI_API_KEY를 설정해야 해요.")
+        return
+    week_number = 1
+    if context.args and context.args[0].isdigit():
+        week_number = max(1, min(4, int(context.args[0])))
+    info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
+    plans = _load_monthly_weekly_plans(settings, month=month)
+    plan = next((p for p in plans if p.week_number == week_number), None)
+    if plan is None:
+        await msg.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
+        return
+    book = _load_club_book_info(settings, month=plan.month)
+    title = (book.get("title") or "").strip()
+    authors = (book.get("authors") or "").strip() or "미상"
+    description = (book.get("description") or "").strip()
+    if not title:
+        await msg.reply_text("책이 아직 확정되지 않았어요.")
+        return
+    if not description:
+        searched = await _search_book_description_for_summary(
+            title=title,
+            authors=authors,
+            api_key=settings.google_books_api_key,
+        )
+        description = (searched or "").strip()
+    if not description:
+        await msg.reply_text("책 소개를 찾지 못했어요. 책 검색·선택으로 소개를 채운 뒤 다시 시도해줘요.")
+        return
+
+    await msg.reply_text(f"{plan.month} {week_number}주차만 다시 생성 중…")
+    try:
+        summary, encouragement, quiz_json, discussion_topic = await asyncio.to_thread(
+            _get_openai_weekly_plan_bundle,
+            settings.openai_api_key,
+            settings.openai_summary_model,
+            title=title,
+            authors=authors,
+            description=description,
+            month=plan.month,
+            week_number=week_number,
+            start_page=plan.start_page,
+            end_page=plan.end_page,
+        )
+    except Exception:
+        logger.info("Failed to rebuild single week plan", exc_info=True)
+        await msg.reply_text("지금은 해당 주차를 다시 만들지 못했어요. 잠시 후 다시 시도해줘요.")
+        return
+
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            upsert_monthly_weekly_plan_postgres(
+                conn,
+                month=plan.month,
+                week_number=week_number,
+                start_page=plan.start_page,
+                end_page=plan.end_page,
+                summary=summary,
+                encouragement=encouragement,
+                scheduled_date=plan.scheduled_date,
+                quiz_json=quiz_json,
+                discussion_topic=discussion_topic,
+            )
+        finally:
+            conn.close()
+    else:
+        conn = connect_sqlite(settings.db_path)
+        try:
+            upsert_monthly_weekly_plan_sqlite(
+                conn,
+                month=plan.month,
+                week_number=week_number,
+                start_page=plan.start_page,
+                end_page=plan.end_page,
+                summary=summary,
+                encouragement=encouragement,
+                scheduled_date=plan.scheduled_date,
+                quiz_json=quiz_json,
+                discussion_topic=discussion_topic,
+            )
+        finally:
+            conn.close()
+
+    refreshed = _load_monthly_weekly_plans(settings, month=plan.month)
+    new_plan = next((p for p in refreshed if p.week_number == week_number), None)
+    if new_plan is None:
+        await msg.reply_text("저장은 됐는데 다시 불러오지 못했어요. /preview_weekly 로 확인해줘요.")
+        return
+    await msg.reply_text("저장했어요. 아래는 새 버전 미리보기예요.")
+    body = _format_weekly_engagement_preview(new_plan)
+    for chunk in _chunk_text_for_telegram(body):
+        await msg.reply_text(chunk)
+
+
 async def cmd_weekly_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
         return
@@ -3238,6 +3420,8 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("send_weekly_check", cmd_send_weekly_check))
     app.add_handler(CommandHandler("send_weekly_quiz", cmd_send_weekly_quiz))
     app.add_handler(CommandHandler("send_weekly_topic", cmd_send_weekly_topic))
+    app.add_handler(CommandHandler("preview_weekly", cmd_preview_weekly))
+    app.add_handler(CommandHandler("rebuild_weekly", cmd_rebuild_weekly))
     app.add_handler(CommandHandler("book_search", cmd_book_search))
     app.add_handler(CommandHandler("book_select", cmd_book_select))
     app.add_handler(CommandHandler("build_book_summary", cmd_build_book_summary))
