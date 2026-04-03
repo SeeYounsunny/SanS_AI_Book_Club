@@ -1873,6 +1873,112 @@ def _build_taste_summary_prompt(quotes: List[Bookmark]) -> str:
     return "\n".join(lines)
 
 
+_TASTE_LLM_MAX_ITEMS = 100
+_TASTE_LLM_PER_ITEM_CHARS = 2000
+_TASTE_LLM_TOTAL_CHARS = 14000
+
+
+def _load_global_book_title(settings: Settings) -> Optional[str]:
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            return get_setting_postgres(conn, key="book_title")
+        finally:
+            conn.close()
+    conn = connect_sqlite(settings.db_path)
+    try:
+        return get_setting_sqlite(conn, key="book_title")
+    finally:
+        conn.close()
+
+
+def _pack_bookmarks_for_taste_llm(bookmarks: List[Bookmark]) -> Tuple[str, int, int]:
+    """Pack bookmarks into one blob for the LLM. Returns (text, included_count, fetched_count)."""
+    fetched = len(bookmarks)
+    parts: List[str] = []
+    total_chars = 0
+    included = 0
+    for b in bookmarks[:_TASTE_LLM_MAX_ITEMS]:
+        raw = (b.text or "").strip()
+        if not raw:
+            continue
+        piece = _truncate_for_embedding(raw, _TASTE_LLM_PER_ITEM_CHARS)
+        page = f"p.{b.page} " if b.page is not None else ""
+        line = f"[#{b.id}] {page}{piece}"
+        add_len = len(line) + 1
+        if total_chars + add_len > _TASTE_LLM_TOTAL_CHARS:
+            break
+        parts.append(line)
+        total_chars += add_len
+        included += 1
+    return "\n".join(parts), included, fetched
+
+
+def _get_openai_reader_taste_from_bookmarks(
+    api_key: str,
+    model: str,
+    *,
+    bulk_text: str,
+    meta_note: str,
+    book_title: Optional[str],
+    brief: bool,
+) -> str:
+    client = OpenAI(api_key=api_key)
+    book_part = ""
+    if book_title and str(book_title).strip():
+        book_part = f"\n[참고: 모임에서 쓰는 책 제목] {str(book_title).strip()}\n"
+    system = (
+        "너는 독서모임을 돕는 독서코치야. 사용자가 저장한 책갈피(인용·메모) 텍스트만 근거로, "
+        "그 독자가 어떤 주제·가치관·정서·문장에 끌리는지 독서 취향을 분석한다. "
+        "근거 밖 추측은 하지 말고 인용과 연결해 설명한다. 한국어로 답한다."
+    )
+    if brief:
+        user = (
+            f"{meta_note}{book_part}"
+            "아래는 이 독자가 시간에 걸쳐 저장한 책갈피 모음이야.\n\n"
+            f"{bulk_text}\n\n"
+            "요청:\n"
+            "- 위 내용만 보고 이 독자의 독서 취향을 짧게 정리해.\n"
+            "- 한국어로 3~7문장 정도, 하나의 짧은 문단으로 (불릿·번호 목록 금지).\n"
+            "- 심리 진단·단정 대신 '경향'으로 말하기.\n"
+            "- 마지막에 질문 붙이지 말기.\n"
+            "- 책갈피가 1~2개뿐이면 한계를 한 문장 안에 짧게 언급하고 가능한 범위에서만 말하기.\n"
+        )
+        temperature = 0.45
+    else:
+        user = (
+            f"{meta_note}{book_part}"
+            "아래는 이 독자가 시간에 걸쳐 저장한 책갈피 모음이야. 가능한 한 모두를 한 번에 보고 판단해.\n\n"
+            f"{bulk_text}\n\n"
+            "요청:\n"
+            "- 위 인용들만 근거로 독자의 독서 취향을 분석해 설명해.\n"
+            "- 한국어로 8~18문장 정도, 자연스러운 문단 몇 개로 (과한 마크다운·소제목 남발 금지).\n"
+            "- 어떤 주제·가치·정서·문장 스타일에 반복해서 끌리는지, 인용과 연결해 말하기.\n"
+            "- '이 사람은 ~이다' 같은 단정은 피하고 '~로 보이는 경향'처럼 완곡하게.\n"
+            "- 근거 없는 추측 금지. 책갈피가 적으면 한계를 짧게 밝힌 뒤 가능한 범위만.\n"
+            "- 질문으로 끝내지 말 것.\n"
+        )
+        temperature = 0.55
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=temperature,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+async def _reply_telegram_chunks(msg, text: str, chunk_size: int = 4000) -> None:
+    t = (text or "").strip()
+    if not t:
+        await msg.reply_text("응답이 비어 있어요.")
+        return
+    for i in range(0, len(t), chunk_size):
+        await msg.reply_text(t[i : i + chunk_size])
+
+
 def _get_openai_taste_summary(api_key: str, model: str, prompt: str) -> str:
     client = OpenAI(api_key=api_key)
     resp = client.chat.completions.create(
@@ -1902,7 +2008,7 @@ def _get_openai_taste_summary(api_key: str, model: str, prompt: str) -> str:
 
 
 async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Admin-only "taste snapshot" based on their bookmarks.
+    # Admin-only: load saved bookmarks, send in bulk to LLM, explain reading taste.
     if not await _require_private_chat(update):
         return
     if not await _require_admin(update, context):
@@ -1914,20 +2020,23 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if msg is None or user is None:
         return
 
-    limit = max(1, min(100, int(settings.taste_bookmarks_limit)))
-    max_clusters = max(1, min(8, int(settings.taste_max_clusters)))
+    openai_key = (settings.openai_api_key or "").strip()
+    if not openai_key:
+        await msg.reply_text("OPENAI_API_KEY 가 설정되어 있어야 해요.")
+        return
 
-    items = []
+    fetch_limit = min(100, max(1, int(settings.bookmarks_max_per_user)))
+    items: List[Bookmark] = []
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
-            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, limit=limit)
+            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, limit=fetch_limit)
         finally:
             conn.close()
     else:
         conn = connect_sqlite(settings.db_path)
         try:
-            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, limit=limit)
+            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, limit=fetch_limit)
         finally:
             conn.close()
 
@@ -1935,25 +2044,32 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("아직 저장된 책갈피가 없어요. 먼저 /bookmark 로 문장을 저장해보세요.")
         return
 
-    embeddings_provider = _norm_flag(settings.embeddings_provider)
-    openai_key = (settings.openai_api_key or "").strip()
-    if embeddings_provider != "openai" or not openai_key:
-        await msg.reply_text(
-            "취향 스냅샷(임베딩 기반)을 사용하려면 운영진이 EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY를 설정해야 해요."
-        )
-        return
-
-    # Fetch embeddings in a thread to avoid blocking the event loop.
-    # Ensure we don't send empty strings
     items = [b for b in items if (b.text or "").strip()]
     if not items:
-        await msg.reply_text("분석할 수 있는 책갈피 문장이 없어요. /bookmark 로 문장을 저장해보세요.")
+        await msg.reply_text("분석할 수 있는 책갈피 문장이 없어요.")
         return
 
-    texts = [b.text for b in items]
+    bulk_text, included, fetched = _pack_bookmarks_for_taste_llm(items)
+    if not bulk_text.strip():
+        await msg.reply_text("책갈피 텍스트가 비어 있어요.")
+        return
+
+    if included < fetched:
+        meta_note = f"(※ 저장 책갈피 {fetched}개 중 길이·개수 제한으로 최근 {included}개만 포함)\n"
+    else:
+        meta_note = f"(※ 저장 책갈피 {included}개 포함)\n"
+
+    book_title = _load_global_book_title(settings)
+
     try:
-        embeddings = await _with_openai_retries(
-            _get_openai_embeddings, openai_key, settings.openai_embeddings_model, texts
+        answer = await _with_openai_retries(
+            _get_openai_reader_taste_from_bookmarks,
+            openai_key,
+            settings.openai_summary_model,
+            bulk_text=bulk_text,
+            meta_note=meta_note,
+            book_title=book_title,
+            brief=False,
         )
     except AuthenticationError:
         await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
@@ -1965,30 +2081,23 @@ async def cmd_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("네트워크 문제로 취향 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
         return
     except APIError as e:
-        logger.info("OpenAI APIError while fetching embeddings", exc_info=True)
+        logger.info("OpenAI APIError while generating taste (bulk LLM)", exc_info=True)
         await msg.reply_text(f"OpenAI 오류로 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
         return
     except Exception as e:
-        logger.info("Failed to fetch embeddings", exc_info=True)
+        logger.info("Failed to generate taste (bulk LLM)", exc_info=True)
         await msg.reply_text(f"지금은 취향 분석을 불러오지 못했어요. ({e.__class__.__name__})")
         return
 
-    try:
-        snapshot, _themes = _taste_snapshot_from_bookmarks(
-            bookmarks=items, embeddings=embeddings, max_clusters=max_clusters
-        )
-    except Exception as e:
-        logger.info("Failed to build taste snapshot", exc_info=True)
-        await msg.reply_text(f"취향 스냅샷 생성에 실패했어요. ({e.__class__.__name__}: {str(e)[:120]})")
+    if not answer:
+        await msg.reply_text("응답이 비어 있어요. 잠시 후 다시 시도해줘요.")
         return
 
-    if len(snapshot) > 4000:
-        snapshot = snapshot[:3990] + "…"
-    await msg.reply_text(snapshot)
+    await _reply_telegram_chunks(msg, answer)
 
 
 async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Admin-only 1~3 line summary (LLM) based on representative bookmarks.
+    # Admin-only: same bulk bookmarks, shorter LLM answer.
     if not await _require_private_chat(update):
         return
     if not await _require_admin(update, context):
@@ -2000,85 +2109,52 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if msg is None or user is None:
         return
 
-    embeddings_provider = _norm_flag(settings.embeddings_provider)
     openai_key = (settings.openai_api_key or "").strip()
-    if embeddings_provider != "openai" or not openai_key:
-        await msg.reply_text(
-            "이 기능을 쓰려면 서버에 EMBEDDINGS_PROVIDER=openai 와 OPENAI_API_KEY 를 함께 설정해야 해요."
-        )
+    if not openai_key:
+        await msg.reply_text("OPENAI_API_KEY 가 설정되어 있어야 해요.")
         return
 
-    limit = max(3, min(100, int(settings.taste_bookmarks_limit)))
-    max_clusters = max(1, min(8, int(settings.taste_max_clusters)))
-    max_quotes = max(3, min(12, int(settings.taste_summary_max_quotes)))
-
-    items = []
+    fetch_limit = min(100, max(1, int(settings.bookmarks_max_per_user)))
+    items: List[Bookmark] = []
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
-            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, limit=limit)
+            items = list_bookmarks_postgres(conn, telegram_user_id=user.id, limit=fetch_limit)
         finally:
             conn.close()
     else:
         conn = connect_sqlite(settings.db_path)
         try:
-            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, limit=limit)
+            items = list_bookmarks_sqlite(conn, telegram_user_id=user.id, limit=fetch_limit)
         finally:
             conn.close()
 
     items = [b for b in items if (b.text or "").strip()]
-    if len(items) < 2:
-        await msg.reply_text("요약을 만들기엔 책갈피가 아직 너무 적어요. 문장을 2개 이상 저장해줘요.")
+    if not items:
+        await msg.reply_text("요약할 책갈피가 없어요.")
         return
 
-    texts = [b.text for b in items]
-    try:
-        embeddings = await _with_openai_retries(
-            _get_openai_embeddings, openai_key, settings.openai_embeddings_model, texts
-        )
-    except AuthenticationError:
-        await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
-        return
-    except RateLimitError as e:
-        await msg.reply_text(_rate_limit_hint(e))
-        return
-    except APIConnectionError:
-        await msg.reply_text("네트워크 문제로 요약 분석을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
-        return
-    except APIError as e:
-        logger.info("OpenAI APIError while fetching embeddings for taste_summary", exc_info=True)
-        await msg.reply_text(f"OpenAI 오류로 요약 분석을 불러오지 못했어요. ({e.__class__.__name__})")
-        return
-    except Exception as e:
-        logger.info("Failed to fetch embeddings for taste_summary", exc_info=True)
-        await msg.reply_text(
-            f"지금은 요약을 만들기 위한 분석을 불러오지 못했어요. ({e.__class__.__name__})"
-        )
+    bulk_text, included, fetched = _pack_bookmarks_for_taste_llm(items)
+    if not bulk_text.strip():
+        await msg.reply_text("책갈피 텍스트가 비어 있어요.")
         return
 
-    reps = _select_representative_bookmarks(items, embeddings, max_clusters=max_clusters, max_quotes=max_quotes)
-    prompt = _build_taste_summary_prompt(reps)
-
-    # Include current book title (if configured) to ground the summary.
-    book_title = None
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-        try:
-            book_title = get_setting_postgres(conn, key="book_title")
-        finally:
-            conn.close()
+    if included < fetched:
+        meta_note = f"(※ 저장 책갈피 {fetched}개 중 길이·개수 제한으로 최근 {included}개만 포함)\n"
     else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            book_title = get_setting_sqlite(conn, key="book_title")
-        finally:
-            conn.close()
-    if book_title:
-        prompt = f"[현재 읽는 책: {book_title}]\n" + prompt
+        meta_note = f"(※ 저장 책갈피 {included}개 포함)\n"
+
+    book_title = _load_global_book_title(settings)
 
     try:
         summary = await _with_openai_retries(
-            _get_openai_taste_summary, openai_key, settings.openai_summary_model, prompt
+            _get_openai_reader_taste_from_bookmarks,
+            openai_key,
+            settings.openai_summary_model,
+            bulk_text=bulk_text,
+            meta_note=meta_note,
+            book_title=book_title,
+            brief=True,
         )
     except AuthenticationError:
         await msg.reply_text("OpenAI API 키가 올바르지 않은 것 같아요. (OPENAI_API_KEY 확인 필요)")
@@ -2090,11 +2166,11 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await msg.reply_text("네트워크 문제로 요약을 불러오지 못했어요. 잠시 후 다시 시도해줘요.")
         return
     except APIError as e:
-        logger.info("OpenAI APIError while generating taste summary", exc_info=True)
+        logger.info("OpenAI APIError while generating taste summary (bulk LLM)", exc_info=True)
         await msg.reply_text(f"OpenAI 오류로 요약을 만들지 못했어요. ({e.__class__.__name__})")
         return
     except Exception as e:
-        logger.info("Failed to generate taste summary", exc_info=True)
+        logger.info("Failed to generate taste summary (bulk LLM)", exc_info=True)
         await msg.reply_text(f"지금은 요약을 만들지 못했어요. ({e.__class__.__name__})")
         return
 
@@ -2102,20 +2178,7 @@ async def cmd_taste_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await msg.reply_text("요약 결과가 비어있어요. 잠시 후 다시 시도해줘요.")
         return
 
-    # Ensure 1~3 lines (soft cap)
-    lines = [ln.strip() for ln in summary.splitlines() if ln.strip()]
-    lines = lines[:3]
-    encouragement = "오늘은 10분만 읽고 책갈피 하나 남겨봐요."
-    if not lines:
-        lines = [encouragement]
-    elif len(lines) < 3:
-        lines.append(encouragement)
-    else:
-        lines[-1] = f"{lines[-1]} {encouragement}"
-    out = "\n".join(lines)
-    if len(out) > 4000:
-        out = out[:3990] + "…"
-    await msg.reply_text(out)
+    await _reply_telegram_chunks(msg, summary)
 
 
 async def cmd_diag_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2138,26 +2201,15 @@ async def cmd_diag_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     is_admin = await _is_member_of(settings.admin_chat_id, update, context)
 
     lines = [
-        "취향 기능 진단 (/taste / /taste_summary)",
-        f"- provider(EMBEDDINGS_PROVIDER): {embeddings_provider or '(empty)'}",
+        "취향 기능 진단 (/taste / /taste_summary) — 책갈피 일괄 + 채팅완성(LLM)",
+        f"- EMBEDDINGS_PROVIDER: {embeddings_provider or '(empty)'} (선택, /taste·/taste_summary 에는 불필요)",
         f"- has OPENAI_API_KEY: {'yes' if has_openai_key else 'no'}",
         f"- member chat membership check: {'ok' if is_member else 'fail'}",
         f"- admin chat membership check: {'ok' if is_admin else 'fail'}",
     ]
 
-    # Minimal OpenAI smoke test (embeddings + completion) to pinpoint failures.
-    if embeddings_provider == "openai" and has_openai_key:
-        try:
-            _ = await asyncio.to_thread(
-                _get_openai_embeddings,
-                (settings.openai_api_key or "").strip(),
-                settings.openai_embeddings_model,
-                ["diag"],
-            )
-            lines.append("- embeddings call: ok")
-        except Exception as e:
-            lines.append(f"- embeddings call: fail ({e.__class__.__name__})")
-
+    # OpenAI smoke test: chat completion always relevant; embeddings optional (taste_member/club_taste).
+    if has_openai_key:
         try:
             text = await asyncio.to_thread(
                 _get_openai_taste_summary,
@@ -2168,6 +2220,20 @@ async def cmd_diag_taste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lines.append(f"- chat completion call: {'ok' if bool((text or '').strip()) else 'empty'}")
         except Exception as e:
             lines.append(f"- chat completion call: fail ({e.__class__.__name__})")
+
+        if embeddings_provider == "openai":
+            try:
+                _ = await asyncio.to_thread(
+                    _get_openai_embeddings,
+                    (settings.openai_api_key or "").strip(),
+                    settings.openai_embeddings_model,
+                    ["diag"],
+                )
+                lines.append("- embeddings call: ok (taste_member/club_taste 용)")
+            except Exception as e:
+                lines.append(f"- embeddings call: fail ({e.__class__.__name__})")
+        else:
+            lines.append("- embeddings call: skipped (taste_member/club_taste 만 필요)")
 
     await msg.reply_text("\n".join(lines))
 
