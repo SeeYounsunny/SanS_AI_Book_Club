@@ -86,6 +86,48 @@ logger = logging.getLogger(__name__)
 def _norm_flag(s: Optional[str]) -> str:
     return (s or "").strip().lower()
 
+_BUILD_COOLDOWN_MINUTES = 60
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+def _parse_iso_dt(s: Optional[str]) -> Optional[datetime]:
+    raw = (s or "").strip()
+    if not raw:
+        return None
+    try:
+        # stored as ISO without timezone; treat as UTC
+        return datetime.fromisoformat(raw.replace("Z", ""))
+    except Exception:
+        return None
+
+def _get_month_setting(settings: Settings, *, month: str, key: str) -> Optional[str]:
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            return get_month_setting_postgres(conn, month=month, key=key)
+        finally:
+            conn.close()
+    conn = connect_sqlite(settings.db_path)
+    try:
+        return get_month_setting_sqlite(conn, month=month, key=key)
+    finally:
+        conn.close()
+
+def _set_month_setting(settings: Settings, *, month: str, key: str, value: str) -> None:
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            set_month_setting_postgres(conn, month=month, key=key, value=value)
+        finally:
+            conn.close()
+        return
+    conn = connect_sqlite(settings.db_path)
+    try:
+        set_month_setting_sqlite(conn, month=month, key=key, value=value)
+    finally:
+        conn.close()
+
 def _rate_limit_hint(e: Exception) -> str:
     """
     Best-effort: OpenAI RateLimitError can mean RPM/TPM throttling OR insufficient quota.
@@ -1125,6 +1167,25 @@ async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     info = _load_club_book_info(settings)
+    month = info.get("month") or _get_active_month(settings)
+    force = bool(context.args and context.args[0].strip().lower() in ("force", "--force", "-f"))
+
+    existing_summary = (info.get("summary") or "").strip()
+    if existing_summary and not force:
+        await msg.reply_text("이미 저장된 책 요약이 있어요. (재생성 필요하면: /build_book_summary force)\n\n" + existing_summary)
+        return
+
+    # Cooldown guard (admin에서도 연타 방지)
+    last_iso = _get_month_setting(settings, month=month, key="book_summary_generated_at_iso")
+    last_dt = _parse_iso_dt(last_iso)
+    if last_dt and not force:
+        delta_min = (datetime.utcnow() - last_dt).total_seconds() / 60.0
+        if delta_min < _BUILD_COOLDOWN_MINUTES:
+            await msg.reply_text(
+                f"방금 생성한 요약이 있어요. {_BUILD_COOLDOWN_MINUTES}분 쿨다운 중입니다. "
+                "필요하면 /build_book_summary force 로 재생성할 수 있어요."
+            )
+            return
     title = (info.get("title") or "").strip()
     authors = (info.get("authors") or "").strip() or "미상"
     description = (info.get("description") or "").strip()
@@ -1172,19 +1233,8 @@ async def cmd_build_book_summary(update: Update, context: ContextTypes.DEFAULT_T
     lines = lines[:4]
     summary = "\n".join(lines)
 
-    month = info.get("month") or _get_active_month(settings)
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-        try:
-            set_month_setting_postgres(conn, month=month, key="book_summary", value=summary)
-        finally:
-            conn.close()
-    else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            set_month_setting_sqlite(conn, month=month, key="book_summary", value=summary)
-        finally:
-            conn.close()
+    _set_month_setting(settings, month=month, key="book_summary", value=summary)
+    _set_month_setting(settings, month=month, key="book_summary_generated_at_iso", value=_now_iso())
 
     await msg.reply_text("책 요약을 저장했어요.\n\n" + summary)
 
@@ -1202,6 +1252,28 @@ async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYP
 
     info = _load_club_book_info(settings)
     month = info.get("month") or _get_active_month(settings)
+    force = bool(context.args and context.args[0].strip().lower() in ("force", "--force", "-f"))
+
+    # Cache: if plan exists, don't call LLM again unless forced.
+    existing = _load_monthly_weekly_plans(settings, month=month)
+    if len(existing) >= 4 and not force:
+        await msg.reply_text(
+            "이미 저장된 4주 계획이 있어요. 멤버는 /show_month_plan 으로 확인하면 됩니다.\n"
+            "재생성 필요하면: /build_month_plan force"
+        )
+        return
+
+    # Cooldown guard (admin에서도 연타 방지)
+    last_iso = _get_month_setting(settings, month=month, key="month_plan_generated_at_iso")
+    last_dt = _parse_iso_dt(last_iso)
+    if last_dt and not force:
+        delta_min = (datetime.utcnow() - last_dt).total_seconds() / 60.0
+        if delta_min < _BUILD_COOLDOWN_MINUTES:
+            await msg.reply_text(
+                f"방금 생성한 4주 계획이 있어요. {_BUILD_COOLDOWN_MINUTES}분 쿨다운 중입니다. "
+                "필요하면 /build_month_plan force 로 재생성할 수 있어요."
+            )
+            return
     title = (info.get("title") or "").strip()
     authors = (info.get("authors") or "").strip() or "미상"
     description = (info.get("description") or "").strip()
@@ -1280,6 +1352,8 @@ async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
         finally:
             conn.close()
+
+    _set_month_setting(settings, month=month, key="month_plan_generated_at_iso", value=_now_iso())
 
     preview_lines = [f"{month} 4주 계획을 저장했어요."]
     for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
@@ -2735,7 +2809,8 @@ async def cmd_my_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def on_mentioned_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _require_member_or_admin(update, context):
+    # 비용 보호: 멘션 Q&A는 운영진만 응답
+    if not await _require_admin(update, context):
         return
     msg = update.effective_message
     if msg is None or not getattr(msg, "text", None):
