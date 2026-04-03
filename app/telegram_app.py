@@ -1385,19 +1385,36 @@ async def cmd_show_month_plan(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     info = _load_club_book_info(settings)
     month = info.get("month") or _get_active_month(settings)
+    page_count_raw = (info.get("page_count") or "").strip()
     plans = _load_monthly_weekly_plans(settings, month=month)
     if not plans:
         await msg.reply_text("아직 4주 계획이 없어요. 운영진이 /build_month_plan 을 먼저 실행해줘요.")
         return
-    lines = [f"{month} 4주 읽기 계획", ""]
+    lines = [f"📘 {month} 4주 읽기 계획", ""]
     for plan in plans:
+        first_line = ""
+        if plan.summary:
+            first_line = next((ln.strip() for ln in plan.summary.splitlines() if ln.strip()), "")
         lines.extend(
             [
-                f"{plan.week_number}주차 ({plan.scheduled_date})",
-                f"- 범위: p.{plan.start_page}-{plan.end_page}",
-                f"- 안내: {plan.summary.splitlines()[0] if plan.summary else ''}",
+                f"━━━━━━━━━━",
+                f"✅ {plan.week_number}주차  ({plan.scheduled_date})",
+                f"📖 범위: p.{plan.start_page}-{plan.end_page}",
+                (f"📝 안내: {first_line}" if first_line else "📝 안내: (요약 없음)"),
+                "",
             ]
         )
+
+    if page_count_raw.isdigit():
+        total_pages = int(page_count_raw)
+        if total_pages > 0:
+            per_day = (total_pages + 30 - 1) // 30
+            lines.extend(
+                [
+                    "━━━━━━━━━━",
+                    f"💪 30일 기준으로 하루 약 {per_day}p만 꾸준히 읽어도 충분해요. 오늘도 화이팅!",
+                ]
+            )
     await msg.reply_text("\n".join(lines))
 
 
