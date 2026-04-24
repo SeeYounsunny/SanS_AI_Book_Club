@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # Optional: used for /book_search and /book_select
     google_books_api_key: Optional[str] = Field(default=None, alias="GOOGLE_BOOKS_API_KEY")
 
+    # Predefined book catalog (month -> book info)
+    # If set, the bot will prefer this catalog over monthly DB settings.
+    book_catalog_path: str = Field(default="./data/book_catalog.json", alias="BOOK_CATALOG_PATH")
+
     # Optional puzzle/progress game
     progress_game_enabled: bool = Field(default=False, alias="PROGRESS_GAME_ENABLED")
     progress_game_grid_size: int = Field(default=100, alias="PROGRESS_GAME_GRID_SIZE")

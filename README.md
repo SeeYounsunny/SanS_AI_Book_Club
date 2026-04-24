@@ -12,10 +12,9 @@
 
 ## 월별(이달의 책) 구조
 
-- 책/모임 정보는 **월(YYYY-MM) 단위로 저장**됩니다.
-- 운영진은 `/set_month 2026-04`로 “이번에 설정할 월”을 지정한 뒤 책/일정/페이지를 설정합니다.
+- 책/모임 정보는 파일 `data/book_catalog.json`(기본)에서 **월(YYYY-MM) → 책 정보** 형태로 관리합니다.
 - 멤버는 `/book`으로 **이번 달 책**, `/book_month 2026-04`로 **특정 월의 책**을 확인할 수 있어요.
-- 다음 달/다다음 달 책도 미리 세팅해둘 수 있고, 실제 자동 발송은 각 주차 `scheduled_date` 기준으로 동작합니다.
+- 파일 위치는 환경변수 `BOOK_CATALOG_PATH`로 바꿀 수 있습니다.
 
 ## Chat 구조 (중요)
 
@@ -32,9 +31,8 @@ chat id 확인은 운영진 전용 `/chatid`를 사용하세요.
   - `/book`, `/book_month YYYY-MM`, `/plan`
   - (1:1) `/my_progress`, `/bookmark`, `/bookmarks`
 - 운영진:
-  - `/set_month YYYY-MM`, `/book_search`, `/book_select`, `/set_book`
-  - `/build_book_summary`, `/send_book_info`
-  - `/set_meeting`, `/set_pages`, `/show_book`
+  - `/book_search`, `/book_select` (참고용: 결과를 `data/book_catalog.json`에 옮겨 적기)
+  - `/build_book_summary`, `/send_book_info`, `/show_book`
   - `/build_month_plan`, `/show_month_plan`
   - `/send_weekly_check [주차]`, `/send_weekly_quiz [주차]`, `/send_weekly_topic [주차]`
   - `/preview_weekly [주차]`, `/rebuild_weekly [주차]` (보내기 전 확인·해당 주만 재생성)
@@ -42,11 +40,26 @@ chat id 확인은 운영진 전용 `/chatid`를 사용하세요.
 
 ## 운영 팁
 
-- **페이지 수는 수동 확인 권장**: Google Books의 한국어판 페이지 수가 실제 책과 다를 수 있습니다. 실제 페이지 수는 `/set_pages`로 덮어써주세요.
+- **페이지 수는 수동 확인 권장**: Google Books의 한국어판 페이지 수가 실제 책과 다를 수 있습니다. 실제 페이지 수는 `data/book_catalog.json`의 `page_count`로 관리하세요.
 - **책 요약 생성**: `/build_book_summary`는 책 제목/저자를 기준으로 설명문을 다시 검색해 보강한 뒤 요약을 만듭니다.
 - **주차 계획 재생성**: 페이지 수나 모임 날짜를 바꿨다면 `/build_month_plan`을 다시 실행해야 주차 범위가 갱신됩니다.
 - **진도 상태 업데이트**: 이전 주차 메시지가 방에 남아 있으면 같은 버튼을 다시 눌러 최신 상태로 덮어쓸 수 있습니다.
 - **멘션 Q&A**: 단체방에서 `@봇이름 이번달 책 뭐야?`, `@봇이름 다음달 모임 언제야?`처럼 질문할 수 있습니다. 그룹에서 안 되면 BotFather의 Group Privacy 설정을 확인하세요.
+
+## 카탈로그 자동 보강(설명/요약)
+
+교보문고 상품 페이지는 브라우저 JS가 필요해 서버에서 그대로 스크래핑이 어려운 경우가 있어,
+이 스크립트는 **Google Books의 description**을 이용해 `description`/`summary`를 채웁니다.
+
+```bash
+python3 -m app.catalog_enrich
+```
+
+기본 카탈로그 경로는 `./data/book_catalog.json`이고, 환경변수로 바꿀 수 있습니다:
+
+```bash
+BOOK_CATALOG_PATH=./data/book_catalog.json python3 -m app.catalog_enrich
+```
 
 ## Requirements
 

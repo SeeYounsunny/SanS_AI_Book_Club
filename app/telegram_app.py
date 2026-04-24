@@ -25,6 +25,7 @@ from telegram.ext import (
     filters,
 )
 
+from app.book_catalog import get_book_for_month, load_book_catalog
 from app.config import Settings
 from app.db import (
     Bookmark,
@@ -129,6 +130,53 @@ def _set_month_setting(settings: Settings, *, month: str, key: str, value: str) 
         set_month_setting_sqlite(conn, month=month, key=key, value=value)
     finally:
         conn.close()
+
+
+def _get_global_setting(settings: Settings, *, key: str) -> Optional[str]:
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            return get_setting_postgres(conn, key=key)
+        finally:
+            conn.close()
+    conn = connect_sqlite(settings.db_path)
+    try:
+        return get_setting_sqlite(conn, key=key)
+    finally:
+        conn.close()
+
+
+def _set_global_setting(settings: Settings, *, key: str, value: str) -> None:
+    if is_postgres_url(settings.database_url):
+        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+        try:
+            set_setting_postgres(conn, key=key, value=value)
+        finally:
+            conn.close()
+        return
+    conn = connect_sqlite(settings.db_path)
+    try:
+        set_setting_sqlite(conn, key=key, value=value)
+    finally:
+        conn.close()
+
+
+_LAST_MEMBER_MESSAGE_ID_KEY = "last_member_message_id"
+
+
+def _remember_last_member_message(settings: Settings, *, message_id: int) -> None:
+    try:
+        _set_global_setting(settings, key=_LAST_MEMBER_MESSAGE_ID_KEY, value=str(int(message_id)))
+    except Exception:
+        logger.info("Failed to store last member message id", exc_info=True)
+
+
+def _load_last_member_message_id(settings: Settings) -> Optional[int]:
+    raw = _get_global_setting(settings, key=_LAST_MEMBER_MESSAGE_ID_KEY)
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    return int(raw) if raw.isdigit() else None
 
 def _rate_limit_hint(e: Exception) -> str:
     """
@@ -292,22 +340,20 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /send_weekly_topic [주차]: (운영진) 해당 주차 토론 주제 전송",
             "- /preview_weekly [주차]: (운영진) 저장된 해당 주차 요약·퀴즈·토론 미리보기",
             "- /rebuild_weekly [주차]: (운영진) 해당 주만 OpenAI로 다시 생성·저장 후 미리보기",
-            "- /set_book: 현재 책 제목 설정 (예: /set_book 아무도 미워하지 않는 자의 죽음)",
-            "- /set_meeting: 모임 일정 설정 (예: /set_meeting 2026-04-10 또는 /set_meeting 2026-04-10 20:00)",
-            "- /set_month: 설정/조회 기준 월 설정 (예: /set_month 2026-04)",
-            "- /book_search: 책 검색 (Google Books) (예: /book_search 아무도 미워하지 않는 자의 죽음)",
-            "- /book_select: 검색 결과 중 책 확정 (예: /book_select 1)",
-            "- /build_book_summary: 확정된 책 소개를 1~3줄로 요약(선택)",
+            "- 책/모임 정보는 파일로 관리: data/book_catalog.json (또는 환경변수 BOOK_CATALOG_PATH)",
+            "- /build_book_summary: (선택) 책 소개를 1~3줄로 요약 (OPENAI_API_KEY 필요)",
             "- /build_month_plan: 모임 날짜 기준 4주 계획 생성(주차별 미니 퀴즈·토론 포함)",
             "- /show_month_plan: 4주 계획(운영진은 퀴즈·토론 미리보기 포함)",
             "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
-            "- /set_pages: 총 페이지 수 수동 설정(보정) (예: /set_pages 320)",
             "- /show_book: (기준 월) 책/모임 일정 확인",
             "- /set_puzzle_cover: 사진 메시지에 답장해 퍼즐 대표 이미지 저장",
             "- /show_puzzle <읽은페이지>: 랜덤 퍼즐 미리보기 (운영진 테스트)",
             "- /weekly_stats [주차]: 주차별 응답 통계",
             "- /weekly_stats_detail [주차]: 주차별 멤버 상태 상세",
             "- /share_weekly_stats [주차]: 주차별 통계를 단체방에 공유",
+            "- /sync_catalog_plans [force]: 카탈로그(data/book_catalog.json) 기반으로 4주 계획 DB 반영",
+            "- /delete_last: (운영진) 멤버방에 마지막으로 보낸 봇 메시지 삭제",
+            "- /delete_reply: (운영진) 삭제할 메시지에 답장 후 실행하면 해당 메시지 삭제",
             "",
             "빠른 시작",
             "1) 봇을 독서모임 그룹에 초대",
@@ -433,37 +479,64 @@ def _extract_target_month_from_question(question: str, base_month: str) -> str:
 
 
 def _get_active_month(settings: Settings) -> str:
-    # Stored in club_settings as "active_month" (YYYY-MM). Fallback to current month.
-    active = None
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+    """
+    Active month selection rule (new):
+
+    - Do NOT use "current month".
+    - Pick the book whose meeting_at is the closest upcoming meeting (>= now),
+      using the catalog file (BOOK_CATALOG_PATH).
+    - If no future meeting exists, fall back to current month.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(tz=ZoneInfo(settings.timezone or "Asia/Seoul"))
+    except Exception:
+        now = datetime.now()
+
+    catalog = load_book_catalog(settings.book_catalog_path)
+    if not isinstance(catalog, dict) or not catalog:
+        return _current_month_yyyy_mm()
+
+    candidates: list[tuple[datetime, str]] = []
+
+    for month, entry in catalog.items():
+        if not isinstance(entry, dict):
+            continue
+        m = _parse_month_yyyy_mm(str(month))
+        if not m:
+            continue
+        meeting_at = str(entry.get("meeting_at") or "").strip()
+        if not meeting_at:
+            continue
+        meeting_dt = _parse_meeting_date_for_plan(meeting_at)
+        if meeting_dt is None:
+            continue
+        # Interpret date-only meeting_at as end-of-day so it's still "upcoming" on that day.
+        if len(meeting_at) == 10:
+            meeting_dt = meeting_dt.replace(hour=23, minute=59)
+
+        # Compare with "now" in the same naive/aware space.
         try:
-            active = get_setting_postgres(conn, key="active_month")
-        finally:
-            conn.close()
-    else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            active = get_setting_sqlite(conn, key="active_month")
-        finally:
-            conn.close()
-    parsed = _parse_month_yyyy_mm(active or "")
-    return parsed or _current_month_yyyy_mm()
+            meeting_dt_cmp = meeting_dt.replace(tzinfo=now.tzinfo)  # type: ignore[arg-type]
+            if meeting_dt_cmp >= now:
+                candidates.append((meeting_dt_cmp, m))
+        except Exception:
+            if meeting_dt >= now.replace(tzinfo=None):
+                candidates.append((meeting_dt, m))
+
+    if not candidates:
+        return _current_month_yyyy_mm()
+
+    # closest future meeting
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
 
 
 def _set_active_month(settings: Settings, month: str) -> None:
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-        try:
-            set_setting_postgres(conn, key="active_month", value=month)
-        finally:
-            conn.close()
-    else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            set_setting_sqlite(conn, key="active_month", value=month)
-        finally:
-            conn.close()
+    # Deprecated: active month is no longer stored.
+    _ = settings
+    _ = month
 
 
 async def cmd_set_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -473,16 +546,17 @@ async def cmd_set_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     settings: Settings = context.application.bot_data["settings"]
     if msg is None:
         return
-    if not context.args:
-        month = _get_active_month(settings)
-        await msg.reply_text(f"현재 기준 월: {month}\n사용법: /set_month 2026-04")
-        return
-    month = _parse_month_yyyy_mm(context.args[0])
-    if not month:
-        await msg.reply_text("사용법: /set_month 2026-04")
-        return
-    _set_active_month(settings, month)
-    await msg.reply_text(f"기준 월을 설정했어요: {month}")
+    _ = context
+    await msg.reply_text(
+        "\n".join(
+            [
+                "이제 /set_month 는 사용하지 않아요.",
+                "- 기준 월은 '가장 가까운 다음 모임'을 기준으로 자동 결정돼요.",
+                "- 특정 월의 책을 보려면: /book_month 2026-04",
+                f"- 책/모임 정보는 파일에서 관리해요: `{settings.book_catalog_path}`",
+            ]
+        )
+    )
 
 
 def _load_month_puzzle_meta(settings: Settings, *, month: str) -> Tuple[Optional[str], Optional[int]]:
@@ -665,7 +739,11 @@ async def cmd_book_search(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     context.user_data["book_search_results"] = results
-    lines = ["책 검색 결과 (Google Books)", ""]
+    lines = [
+        "책 검색 결과 (Google Books)",
+        "(참고용) 이제 봇이 책 정보를 DB에 저장하진 않아요. 필요한 값을 data/book_catalog.json에 옮겨 적어주세요.",
+        "",
+    ]
     for i, b in enumerate(results, start=1):
         lines.append(_format_book_candidate_line(i, b))
     lines.extend(["", "확정: /book_select <번호>  (예: /book_select 1)"])
@@ -704,59 +782,33 @@ async def cmd_book_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     info_link = (b.get("info_link") or "").strip()
 
     month = _get_active_month(settings)
-
-    def _set_monthly(key: str, value: Optional[str]) -> None:
-        if not value:
-            return
-        if is_postgres_url(settings.database_url):
-            conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-            try:
-                set_month_setting_postgres(conn, month=month, key=key, value=value)
-            finally:
-                conn.close()
-        else:
-            conn = connect_sqlite(settings.db_path)
-            try:
-                set_month_setting_sqlite(conn, month=month, key=key, value=value)
-            finally:
-                conn.close()
-
-    # Persist monthly. Also store book_title in legacy global key for compatibility where needed.
-    _set_monthly("book_title", title)
-    _set_monthly("book_authors", authors)
-    _set_monthly("book_isbn", isbn)
-    _set_monthly("book_published", published)
-    _set_monthly("book_publisher", publisher)
-    _set_monthly("book_info_link", info_link)
-    if isinstance(pages, int):
-        _set_monthly("book_page_count", str(pages))
-    if description:
-        _set_monthly("book_description", description)
-
-    # keep global book_title for taste_summary prompt fallback
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-        try:
-            set_setting_postgres(conn, key="book_title", value=title)
-        finally:
-            conn.close()
-    else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            set_setting_sqlite(conn, key="book_title", value=title)
-        finally:
-            conn.close()
-
     context.user_data.pop("book_search_results", None)
+
+    # We no longer persist book info into DB. Provide a copy-ready snippet instead.
+    snippet = {
+        month: {
+            "title": title,
+            "authors": authors,
+            "isbn": isbn,
+            "page_count": (str(pages) if isinstance(pages, int) else ""),
+            "published": published,
+            "publisher": publisher,
+            "info_link": info_link,
+            "description": description,
+            "summary": "",
+            "meeting_at": "",
+        }
+    }
+
     await msg.reply_text(
         "\n".join(
             [
-                "책을 확정했어요.",
-                f"- 월: {month}",
-                f"- 제목: {title}",
-                f"- 저자: {authors or '(미상)'}",
-                f"- 페이지: {str(pages) + 'p' if isinstance(pages, int) else '(미상)'}",
-                f"- ISBN: {isbn or '(미상)'}",
+                "이제 /book_select 는 DB에 저장하지 않고, 파일에 옮겨 적을 수 있게 정보만 정리해드려요.",
+                f"- 대상 월: {month}",
+                f"- 파일: `{settings.book_catalog_path}`",
+                "",
+                "아래 JSON을 참고해서 해당 월 항목을 채워주세요.",
+                json.dumps(snippet, ensure_ascii=False, indent=2),
             ]
         )
     )
@@ -764,48 +816,9 @@ async def cmd_book_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def _load_club_book_info(settings: Settings, *, month: Optional[str] = None) -> dict:
     m = _parse_month_yyyy_mm(month or "") or _get_active_month(settings)
-
-    def _get_monthly(key: str) -> Optional[str]:
-        if is_postgres_url(settings.database_url):
-            conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-            try:
-                v = get_month_setting_postgres(conn, month=m, key=key)
-            finally:
-                conn.close()
-        else:
-            conn = connect_sqlite(settings.db_path)
-            try:
-                v = get_month_setting_sqlite(conn, month=m, key=key)
-            finally:
-                conn.close()
-        if v is not None:
-            return v
-        # fallback to legacy global storage
-        if is_postgres_url(settings.database_url):
-            conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-            try:
-                return get_setting_postgres(conn, key=key)
-            finally:
-                conn.close()
-        conn = connect_sqlite(settings.db_path)
-        try:
-            return get_setting_sqlite(conn, key=key)
-        finally:
-            conn.close()
-
-    return {
-        "month": m,
-        "title": _get_monthly("book_title"),
-        "authors": _get_monthly("book_authors"),
-        "isbn": _get_monthly("book_isbn"),
-        "page_count": _get_monthly("book_page_count"),
-        "published": _get_monthly("book_published"),
-        "publisher": _get_monthly("book_publisher"),
-        "info_link": _get_monthly("book_info_link"),
-        "description": _get_monthly("book_description"),
-        "summary": _get_monthly("book_summary"),
-        "meeting_at": _get_monthly("meeting_at"),
-    }
+    catalog = load_book_catalog(settings.book_catalog_path)
+    entry = get_book_for_month(catalog, month=m)
+    return entry.as_dict()
 
 
 def _format_book_info_message(info: dict, *, include_description: bool = True) -> str:
@@ -818,6 +831,8 @@ def _format_book_info_message(info: dict, *, include_description: bool = True) -
     published = info.get("published") or ""
     publisher = info.get("publisher") or ""
     info_link = info.get("info_link") or ""
+    trailer_link = info.get("trailer_link") or ""
+    trailer_links = info.get("trailer_links") or []
     description = info.get("description") or ""
     summary = info.get("summary") or ""
 
@@ -838,6 +853,14 @@ def _format_book_info_message(info: dict, *, include_description: bool = True) -
         lines.append(f"🔢 ISBN: {isbn}")
     if info_link:
         lines.append(f"🔗 링크: {info_link}")
+    trailers: list[str] = []
+    if isinstance(trailer_links, list):
+        trailers.extend([str(x).strip() for x in trailer_links if str(x).strip()])
+    if trailer_link:
+        trailers.append(str(trailer_link).strip())
+    trailers = list(dict.fromkeys([t for t in trailers if t]))
+    for i, t in enumerate(trailers, start=1):
+        lines.append(f"🎬 영상{i}: {t}")
     if summary:
         lines.extend(["", "✨ 책 소개 요약", summary])
     elif include_description and description:
@@ -1129,7 +1152,14 @@ def _plan_has_valid_quiz(plan: MonthlyWeeklyPlan) -> bool:
 
 async def _send_weekly_check_and_quiz(bot: Bot, *, chat_id: str, cfg: WeeklyCheckConfig, quiz_json: str) -> None:
     text, markup = build_weekly_check_message(cfg)
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    # Best-effort: remember last message id for admin delete.
+    try:
+        settings = getattr(bot, "_app_settings", None)  # type: ignore[attr-defined]
+        if settings is not None:
+            _remember_last_member_message(settings, message_id=getattr(msg, "message_id"))
+    except Exception:
+        pass
     parsed = _parse_quiz_for_poll(quiz_json)
     if not parsed:
         return
@@ -1138,7 +1168,7 @@ async def _send_weekly_check_and_quiz(bot: Bot, *, chat_id: str, cfg: WeeklyChec
     room = max(24, 300 - len(label))
     question = label + q_raw[:room]
     try:
-        await bot.send_poll(
+        poll_msg = await bot.send_poll(
             chat_id=chat_id,
             question=question,
             options=options,
@@ -1148,6 +1178,12 @@ async def _send_weekly_check_and_quiz(bot: Bot, *, chat_id: str, cfg: WeeklyChec
             allows_multiple_answers=False,
             explanation=explanation,
         )
+        try:
+            settings = getattr(bot, "_app_settings", None)  # type: ignore[attr-defined]
+            if settings is not None:
+                _remember_last_member_message(settings, message_id=getattr(poll_msg, "message_id"))
+        except Exception:
+            pass
     except TelegramError:
         logger.warning("weekly quiz poll failed", exc_info=True)
 
@@ -1156,6 +1192,7 @@ async def _send_weekly_check_only(bot: Bot, *, chat_id: str, cfg: WeeklyCheckCon
     safe_cfg = WeeklyCheckConfig(
         month=cfg.month,
         week_number=cfg.week_number,
+        book_title=cfg.book_title,
         range_label=cfg.range_label,
         next_range_label=cfg.next_range_label,
         summary=cfg.summary,
@@ -1164,7 +1201,13 @@ async def _send_weekly_check_only(bot: Bot, *, chat_id: str, cfg: WeeklyCheckCon
         show_quiz_teaser=False,
     )
     text, markup = build_weekly_check_message(safe_cfg)
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    try:
+        settings = getattr(bot, "_app_settings", None)  # type: ignore[attr-defined]
+        if settings is not None:
+            _remember_last_member_message(settings, message_id=getattr(msg, "message_id"))
+    except Exception:
+        pass
 
 
 def _chunk_text_for_telegram(text: str, limit: int = 3900) -> List[str]:
@@ -1256,7 +1299,13 @@ def _load_monthly_weekly_plans(settings: Settings, *, month: str) -> List[Monthl
 
 async def send_due_weekly_checks(app: Application) -> int:
     settings: Settings = app.bot_data["settings"]
-    today_iso = datetime.now().strftime("%Y-%m-%d")
+    # Use configured timezone so "Friday" and date boundaries match the club's locale.
+    try:
+        from zoneinfo import ZoneInfo
+
+        today_iso = datetime.now(tz=ZoneInfo(settings.timezone or "Asia/Seoul")).strftime("%Y-%m-%d")
+    except Exception:
+        today_iso = datetime.now().strftime("%Y-%m-%d")
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
         try:
@@ -1276,6 +1325,8 @@ async def send_due_weekly_checks(app: Application) -> int:
         cfg = _weekly_check_cfg_from_plans(plan.month, plan.week_number, month_plans)
         if cfg is None:
             continue
+        info = _load_club_book_info(settings, month=plan.month)
+        cfg = WeeklyCheckConfig(**{**cfg.__dict__, "book_title": (info.get("title") or "").strip()})
         # 자동 발송은 '진도 체크'만. 퀴즈/토론은 운영진이 필요할 때 별도 전송.
         await _send_weekly_check_only(app.bot, chat_id=settings.member_chat_id, cfg=cfg)
         if is_postgres_url(settings.database_url):
@@ -1348,6 +1399,7 @@ def _weekly_check_cfg_from_plans(month: str, week_number: int, plans: List[Month
     return WeeklyCheckConfig(
         month=month,
         week_number=week_number,
+        book_title="",
         range_label=f"p.{plan.start_page}-{plan.end_page}",
         next_range_label=(f"p.{next_plan.start_page}-{next_plan.end_page}" if next_plan else ""),
         summary=plan.summary,
@@ -1493,13 +1545,34 @@ async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYP
     page_count_raw = (info.get("page_count") or "").strip()
     meeting_dt = _parse_meeting_date_for_plan(meeting_at)
     if not title:
-        await msg.reply_text("먼저 책을 확정해줘요. (/book_select 또는 /set_book)")
+        await msg.reply_text(
+            "\n".join(
+                [
+                    "책 정보가 아직 없어요.",
+                    f"- 운영진이 `{settings.book_catalog_path}` 에서 해당 월(YYYY-MM)의 title/authors 등을 채워줘요.",
+                ]
+            )
+        )
         return
     if meeting_dt is None:
-        await msg.reply_text("먼저 모임 날짜를 설정해줘요. (/set_meeting)")
+        await msg.reply_text(
+            "\n".join(
+                [
+                    "모임 일정이 아직 없어요.",
+                    f"- 운영진이 `{settings.book_catalog_path}` 에서 해당 월(YYYY-MM)의 meeting_at 을 채워줘요.",
+                ]
+            )
+        )
         return
     if not page_count_raw.isdigit():
-        await msg.reply_text("먼저 총 페이지 수를 설정해줘요. (/set_pages)")
+        await msg.reply_text(
+            "\n".join(
+                [
+                    "총 페이지 수가 아직 없어요.",
+                    f"- 운영진이 `{settings.book_catalog_path}` 에서 해당 월(YYYY-MM)의 page_count 를 채워줘요.",
+                ]
+            )
+        )
         return
     if not description:
         await msg.reply_text("책 소개가 아직 없어요. 책 검색 후 선택한 책으로 진행해줘요.")
@@ -1704,7 +1777,14 @@ async def cmd_show_puzzle(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     info = _load_club_book_info(settings, month=month)
     page_count_raw = (info.get("page_count") or "").strip()
     if not page_count_raw.isdigit():
-        await msg.reply_text("총 페이지 수가 아직 없어요. /set_pages 로 먼저 설정해줘요.")
+        await msg.reply_text(
+            "\n".join(
+                [
+                    "총 페이지 수가 아직 없어요.",
+                    f"- 운영진이 `{settings.book_catalog_path}` 에서 해당 월(YYYY-MM)의 page_count 를 채워줘요.",
+                ]
+            )
+        )
         return
     total_pages = int(page_count_raw)
     if not context.args or not context.args[0].isdigit():
@@ -1760,7 +1840,8 @@ async def cmd_send_book_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     info = _load_club_book_info(settings)
     text = _format_book_info_message(info)
-    await context.bot.send_message(chat_id=settings.member_chat_id, text=text)
+    sent = await context.bot.send_message(chat_id=settings.member_chat_id, text=text)
+    _remember_last_member_message(settings, message_id=sent.message_id)
     await msg.reply_text("멤버 단체방에 책 정보를 전송했어요.")
 
 
@@ -2476,23 +2557,16 @@ async def cmd_set_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     settings: Settings = context.application.bot_data["settings"]
     if msg is None:
         return
-    title = " ".join(context.args).strip() if context.args else ""
-    if not title:
-        await msg.reply_text("사용법: /set_book <책 제목>")
-        return
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-        try:
-            set_setting_postgres(conn, key="book_title", value=title)
-        finally:
-            conn.close()
-    else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            set_setting_sqlite(conn, key="book_title", value=title)
-        finally:
-            conn.close()
-    await msg.reply_text(f"현재 책을 설정했어요: {title}")
+    _ = context
+    await msg.reply_text(
+        "\n".join(
+            [
+                "이제 /set_book 은 사용하지 않아요.",
+                f"- 책 정보는 파일에서 관리해요: `{settings.book_catalog_path}`",
+                "- 예) data/book_catalog.json 의 해당 월(YYYY-MM) 항목의 title/authors 등을 수정해줘요.",
+            ]
+        )
+    )
 
 def _parse_meeting_args(args: List[str]) -> Optional[str]:
     """
@@ -2527,27 +2601,16 @@ async def cmd_set_meeting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     settings: Settings = context.application.bot_data["settings"]
     if msg is None:
         return
-
-    meeting_at = _parse_meeting_args(context.args or [])
-    if not meeting_at:
-        await msg.reply_text("사용법: /set_meeting 2026-04-10\n또는: /set_meeting 2026-04-10 20:00")
-        return
-
-    month = _get_active_month(settings)
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-        try:
-            set_month_setting_postgres(conn, month=month, key="meeting_at", value=meeting_at)
-        finally:
-            conn.close()
-    else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            set_month_setting_sqlite(conn, month=month, key="meeting_at", value=meeting_at)
-        finally:
-            conn.close()
-
-    await msg.reply_text(f"모임 일정을 설정했어요: {meeting_at} (월: {month})")
+    _ = context
+    await msg.reply_text(
+        "\n".join(
+            [
+                "이제 /set_meeting 은 사용하지 않아요.",
+                f"- 모임 일정은 파일에서 관리해요: `{settings.book_catalog_path}`",
+                "- 해당 월(YYYY-MM) 항목의 meeting_at 값을 수정해줘요. (예: 2026-04-10 20:00)",
+            ]
+        )
+    )
 
 
 async def cmd_show_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2580,28 +2643,16 @@ async def cmd_set_pages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     settings: Settings = context.application.bot_data["settings"]
     if msg is None:
         return
-    if not context.args or not context.args[0].isdigit():
-        await msg.reply_text("사용법: /set_pages <총페이지>\n예) /set_pages 320")
-        return
-    pages = int(context.args[0])
-    if pages <= 0 or pages > 5000:
-        await msg.reply_text("총 페이지 수가 올바르지 않아요. (1~5000)")
-        return
-
-    month = _get_active_month(settings)
-    if is_postgres_url(settings.database_url):
-        conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
-        try:
-            set_month_setting_postgres(conn, month=month, key="book_page_count", value=str(pages))
-        finally:
-            conn.close()
-    else:
-        conn = connect_sqlite(settings.db_path)
-        try:
-            set_month_setting_sqlite(conn, month=month, key="book_page_count", value=str(pages))
-        finally:
-            conn.close()
-    await msg.reply_text(f"총 페이지를 설정했어요: {pages}p (월: {month})")
+    _ = context
+    await msg.reply_text(
+        "\n".join(
+            [
+                "이제 /set_pages 는 사용하지 않아요.",
+                f"- 총 페이지 수는 파일에서 관리해요: `{settings.book_catalog_path}`",
+                "- 해당 월(YYYY-MM) 항목의 page_count 값을 수정해줘요. (예: \"320\")",
+            ]
+        )
+    )
 
 
 def _parse_meeting_date_for_plan(meeting_at: str) -> Optional[datetime]:
@@ -2649,14 +2700,35 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     meeting_dt = _parse_meeting_date_for_plan(meeting_at)
     if meeting_dt is None:
-        await msg.reply_text("모임 일정이 아직 없어요. 운영진이 /set_meeting 으로 먼저 설정해줘요.")
+        await msg.reply_text(
+            "\n".join(
+                [
+                    "모임 일정이 아직 없어요.",
+                    f"- 운영진이 `{settings.book_catalog_path}` 에서 해당 월(YYYY-MM)의 meeting_at 을 채워줘요.",
+                ]
+            )
+        )
         return
     if not page_count_raw.isdigit():
-        await msg.reply_text("총 페이지 수가 아직 없어요. 운영진이 /set_pages 로 먼저 설정해줘요.")
+        await msg.reply_text(
+            "\n".join(
+                [
+                    "총 페이지 수가 아직 없어요.",
+                    f"- 운영진이 `{settings.book_catalog_path}` 에서 해당 월(YYYY-MM)의 page_count 를 채워줘요.",
+                ]
+            )
+        )
         return
     total_pages = int(page_count_raw)
     if total_pages <= 0:
-        await msg.reply_text("총 페이지 수가 올바르지 않아요. 운영진이 /set_pages 를 다시 설정해줘요.")
+        await msg.reply_text(
+            "\n".join(
+                [
+                    "총 페이지 수가 올바르지 않아요.",
+                    f"- 운영진이 `{settings.book_catalog_path}` 에서 해당 월(YYYY-MM)의 page_count 를 확인해줘요.",
+                ]
+            )
+        )
         return
 
     # Defaults (later we can make these configurable)
@@ -2893,6 +2965,7 @@ async def cmd_send_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
     if cfg is None:
         await update.message.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
         return
+    cfg = WeeklyCheckConfig(**{**cfg.__dict__, "book_title": (info.get("title") or "").strip()})
     await _send_weekly_check_only(context.bot, chat_id=settings.member_chat_id, cfg=cfg)
     if is_postgres_url(settings.database_url):
         conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
@@ -2924,6 +2997,7 @@ async def cmd_send_weekly_quiz(update: Update, context: ContextTypes.DEFAULT_TYP
     if plan is None or cfg is None:
         await update.message.reply_text("해당 월의 주차 계획이 없어요. 먼저 /build_month_plan 을 실행해줘요.")
         return
+    cfg = WeeklyCheckConfig(**{**cfg.__dict__, "book_title": (info.get("title") or "").strip()})
     if not _plan_has_valid_quiz(plan):
         await update.message.reply_text("저장된 미니 퀴즈가 없어요. /build_month_plan force 로 다시 생성해줘요.")
         return
@@ -2949,11 +3023,228 @@ async def cmd_send_weekly_topic(update: Update, context: ContextTypes.DEFAULT_TY
     if not topic:
         await update.message.reply_text("저장된 토론 주제가 없어요. /build_month_plan force 로 다시 생성해줘요.")
         return
-    await context.bot.send_message(
+    sent = await context.bot.send_message(
         chat_id=settings.member_chat_id, text=f"{month} {week_number}주차 토론 주제\n\n{topic}"
     )
+    _remember_last_member_message(settings, message_id=sent.message_id)
     await update.message.reply_text(f"{month} {week_number}주차 토론 주제를 전송했어요.")
 
+
+async def cmd_delete_last_member_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Admin utility: delete the last message the bot sent to MEMBER_CHAT_ID.
+    Requires that the message_id was remembered at send time.
+    """
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+
+    mid = _load_last_member_message_id(settings)
+    if mid is None:
+        await msg.reply_text("삭제할 메시지 기록이 없어요. (last_member_message_id 비어있음)")
+        return
+
+    try:
+        ok = await context.bot.delete_message(chat_id=settings.member_chat_id, message_id=mid)
+        # python-telegram-bot returns True on success (or raises)
+        _ = ok
+        await msg.reply_text(f"멤버방에서 마지막 메시지를 삭제했어요. (message_id={mid})")
+        # Clear stored id so we don't delete something unintended later.
+        try:
+            _set_global_setting(settings, key=_LAST_MEMBER_MESSAGE_ID_KEY, value="")
+        except Exception:
+            pass
+    except TelegramError as e:
+        await msg.reply_text(
+            "\n".join(
+                [
+                    "메시지 삭제에 실패했어요.",
+                    f"- message_id: {mid}",
+                    f"- 에러: {e.__class__.__name__}",
+                    "",
+                    "가능한 원인: 봇 권한 부족(can_delete_messages), 너무 오래된 메시지, 이미 삭제됨 등",
+                ]
+            )
+        )
+
+
+async def cmd_delete_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Admin utility: reply to a message, then run /delete_reply to delete that replied message.
+    This works even for messages that were sent before we started tracking message_id.
+    """
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    chat = update.effective_chat
+    if msg is None or chat is None:
+        return
+    reply = getattr(msg, "reply_to_message", None)
+    if reply is None:
+        await msg.reply_text("삭제할 메시지에 답장(Reply)한 뒤 `/delete_reply` 를 실행해줘요.")
+        return
+    target_mid = getattr(reply, "message_id", None)
+    if not isinstance(target_mid, int):
+        await msg.reply_text("답장한 메시지의 message_id를 읽지 못했어요.")
+        return
+    try:
+        await context.bot.delete_message(chat_id=chat.id, message_id=target_mid)
+        # Best-effort: also delete the command message to reduce clutter.
+        try:
+            await context.bot.delete_message(chat_id=chat.id, message_id=msg.message_id)
+        except Exception:
+            pass
+    except TelegramError as e:
+        await msg.reply_text(
+            "\n".join(
+                [
+                    "메시지 삭제에 실패했어요.",
+                    f"- chat_id: {chat.id}",
+                    f"- message_id: {target_mid}",
+                    f"- 에러: {e.__class__.__name__}",
+                    "",
+                    "가능한 원인: 봇 권한 부족(can_delete_messages), 이미 삭제됨 등",
+                ]
+            )
+        )
+
+
+def _truncate_plain(s: str, *, max_len: int) -> str:
+    s = (s or "").strip()
+    if len(s) <= max_len:
+        return s
+    return s[: max(0, max_len - 1)].rstrip() + "…"
+
+
+def _build_weekly_summary_from_book(entry: dict, *, start_page: int, end_page: int) -> str:
+    """
+    Lightweight weekly reading note without calling LLM.
+    For richer week-by-week summaries (and quiz/topic), use /build_month_plan.
+    """
+    base = (entry.get("summary") or "").strip()
+    if not base:
+        base = (entry.get("description") or "").strip()
+    base = _truncate_plain(base, max_len=240)
+    range_line = f"이번 주 범위: p.{start_page}-{end_page}"
+    return "\n".join([range_line, base]).strip() if base else range_line
+
+
+def _sync_month_plans_from_catalog(settings: Settings, *, force: bool = False) -> tuple[int, list[str]]:
+    """
+    Upsert 4-week plans for every month present in the catalog file.
+    Uses only catalog data (page_count, meeting_at, summary/description).
+    """
+    catalog = load_book_catalog(settings.book_catalog_path)
+    if not catalog:
+        return 0, [f"카탈로그가 비어있어요: {settings.book_catalog_path}"]
+
+    updated = 0
+    warnings: list[str] = []
+    for month, entry in catalog.items():
+        if not isinstance(entry, dict):
+            continue
+        m = _parse_month_yyyy_mm(str(month))
+        if not m:
+            continue
+        page_count_raw = str(entry.get("page_count") or "").strip()
+        meeting_at = str(entry.get("meeting_at") or "").strip()
+        if not page_count_raw.isdigit():
+            warnings.append(f"- {m}: page_count가 없거나 숫자가 아니에요.")
+            continue
+        meeting_dt = _parse_meeting_date_for_plan(meeting_at)
+        if meeting_dt is None:
+            warnings.append(f"- {m}: meeting_at이 없거나 형식이 올바르지 않아요. (예: 2026-06-19 22:00)")
+            continue
+
+        if not force:
+            existing = _load_monthly_weekly_plans(settings, month=m)
+            if len(existing) >= 4:
+                # Keep any existing (possibly LLM-generated) plans unless forced.
+                continue
+
+        total_pages = int(page_count_raw)
+        if total_pages <= 0:
+            warnings.append(f"- {m}: page_count가 올바르지 않아요.")
+            continue
+
+        page_ranges = _build_weekly_page_ranges(total_pages)
+        schedule_dates = _build_month_week_schedule(meeting_dt)
+
+        def _encouragement(w: int) -> str:
+            if w == 1:
+                return "첫 주차예요. 가볍게 워밍업하면서 리듬을 만들어봐요!"
+            if w == 2:
+                return "중반으로 들어가요. 이번 주도 꾸준히만 가면 충분해요."
+            if w == 3:
+                return "마지막 스퍼트 전 주차예요. 핵심 아이디어를 정리해보면 좋아요."
+            return "마무리 주차예요. 모임 전까지 남은 부분만 차근차근 읽어보면 돼요. 끝까지 화이팅!"
+
+        if is_postgres_url(settings.database_url):
+            conn = connect_postgres(settings.database_url)  # type: ignore[arg-type]
+            try:
+                for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
+                    upsert_monthly_weekly_plan_postgres(
+                        conn,
+                        month=m,
+                        week_number=idx,
+                        start_page=start_page,
+                        end_page=end_page,
+                        summary=_build_weekly_summary_from_book(entry, start_page=start_page, end_page=end_page),
+                        encouragement=_encouragement(idx),
+                        scheduled_date=schedule_dates[idx - 1],
+                        quiz_json="",
+                        discussion_topic="",
+                    )
+                    updated += 1
+            finally:
+                conn.close()
+        else:
+            conn = connect_sqlite(settings.db_path)
+            try:
+                for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
+                    upsert_monthly_weekly_plan_sqlite(
+                        conn,
+                        month=m,
+                        week_number=idx,
+                        start_page=start_page,
+                        end_page=end_page,
+                        summary=_build_weekly_summary_from_book(entry, start_page=start_page, end_page=end_page),
+                        encouragement=_encouragement(idx),
+                        scheduled_date=schedule_dates[idx - 1],
+                        quiz_json="",
+                        discussion_topic="",
+                    )
+                    updated += 1
+            finally:
+                conn.close()
+
+    return updated, warnings
+
+
+async def cmd_sync_catalog_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    settings: Settings = context.application.bot_data["settings"]
+    if msg is None:
+        return
+
+    force = bool(context.args and (context.args[0] or "").strip().lower() in ("force", "--force", "-f"))
+    updated, warnings = _sync_month_plans_from_catalog(settings, force=force)
+    lines = [
+        "✅ 카탈로그 기반 4주 계획을 DB에 반영했어요.",
+        f"- 카탈로그: `{settings.book_catalog_path}`",
+        f"- upsert된 주차 플랜 수: {updated}",
+        f"- mode: {'force' if force else 'safe'} (기존 4주 계획이 있으면 {'덮어씀' if force else '유지'})",
+        "",
+        "이후 자동 발송(진도 체크)은 각 주차의 scheduled_date(YYYY-MM-DD)에 맞춰 동작합니다.",
+    ]
+    if warnings:
+        lines.extend(["", "⚠️ 일부 월은 건너뛰었어요.", *warnings])
+    await msg.reply_text("\n".join(lines))
 
 async def cmd_preview_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.application.bot_data["settings"]
@@ -3382,6 +3673,8 @@ def build_application(settings: Settings) -> Application:
     app = Application.builder().token(settings.telegram_bot_token).build()
 
     app.bot_data["settings"] = settings
+    # Allow helper functions that only receive a Bot to access settings.
+    setattr(app.bot, "_app_settings", settings)
 
     # Create tables on startup
     if is_postgres_url(settings.database_url):
@@ -3431,6 +3724,9 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("book", cmd_book))
     app.add_handler(CommandHandler("book_month", cmd_book_month))
     app.add_handler(CommandHandler("set_month", cmd_set_month))
+    app.add_handler(CommandHandler("sync_catalog_plans", cmd_sync_catalog_plans))
+    app.add_handler(CommandHandler("delete_last", cmd_delete_last_member_message))
+    app.add_handler(CommandHandler("delete_reply", cmd_delete_reply))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("my_progress", cmd_my_progress))
     app.add_handler(CommandHandler("weekly_stats", cmd_weekly_stats))

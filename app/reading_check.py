@@ -10,6 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 class WeeklyCheckConfig:
     month: str
     week_number: int
+    book_title: str = ""
     range_label: str
     next_range_label: str = ""
     summary: str = ""
@@ -22,8 +23,10 @@ def build_weekly_check_message(cfg: WeeklyCheckConfig) -> Tuple[str, InlineKeybo
     parts = [
         f"{cfg.month} {cfg.week_number}주차 진도 체크",
         "",
+        (f"📚 책: {cfg.book_title}" if (cfg.book_title or "").strip() else "").strip(),
         f"📖 지난주 체크 범위: {cfg.range_label}",
     ]
+    parts = [p for p in parts if p]
     if cfg.next_range_label:
         parts.extend(["", f"🗓 이번주 예고 범위: {cfg.next_range_label}"])
     if cfg.summary:
