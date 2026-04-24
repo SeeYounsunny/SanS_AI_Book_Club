@@ -285,7 +285,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "AI Reading Club Agent입니다.\n\n"
-        "운영자: /send_weekly_check 로 주간 진도체크를 보낼 수 있어요.",
+        "운영자: /help 를 확인하고 /send_weekly_check 로 주간 진도체크를 보낼 수 있어요.",
     )
 
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -335,7 +335,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "운영진용 명령어",
             "",
             "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 MEMBER_CHAT_ID/ADMIN_CHAT_ID 설정용)",
-            "- /send_weekly_check: 북클럽 단체방에 주간 진도 체크 메시지 전송",
+            "- /send_weekly_check [주차]: (수동) 북클럽 단체방에 주간 진도 체크 메시지 전송 (기본 1주차)",
             "- /send_weekly_quiz [주차]: (운영진) 해당 주차 미니 퀴즈(투표) 전송",
             "- /send_weekly_topic [주차]: (운영진) 해당 주차 토론 주제 전송",
             "- /preview_weekly [주차]: (운영진) 저장된 해당 주차 요약·퀴즈·토론 미리보기",
@@ -345,13 +345,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /build_month_plan: 모임 날짜 기준 4주 계획 생성(주차별 미니 퀴즈·토론 포함)",
             "- /show_month_plan: 4주 계획(운영진은 퀴즈·토론 미리보기 포함)",
             "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
-            "- /show_book: (기준 월) 책/모임 일정 확인",
+            "- /show_book: (다음 모임 기준) 책/모임 일정 확인",
             "- /set_puzzle_cover: 사진 메시지에 답장해 퍼즐 대표 이미지 저장",
             "- /show_puzzle <읽은페이지>: 랜덤 퍼즐 미리보기 (운영진 테스트)",
             "- /weekly_stats [주차]: 주차별 응답 통계",
             "- /weekly_stats_detail [주차]: 주차별 멤버 상태 상세",
             "- /share_weekly_stats [주차]: 주차별 통계를 단체방에 공유",
-            "- /sync_catalog_plans [force]: 카탈로그(data/book_catalog.json) 기반으로 4주 계획 DB 반영",
+            "- /sync_catalog_plans [force]: 카탈로그 기반 4주 계획을 DB에 반영 (기본: 기존 계획 유지)",
             "- /delete_last: (운영진) 멤버방에 마지막으로 보낸 봇 메시지 삭제",
             "- /delete_reply: (운영진) 삭제할 메시지에 답장 후 실행하면 해당 메시지 삭제",
             "",
@@ -359,7 +359,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "1) 봇을 독서모임 그룹에 초대",
             "2) 그룹에서 /chatid 로 chat_id 복사",
             "3) Railway Variables에 MEMBER_CHAT_ID/ADMIN_CHAT_ID로 저장",
-            "4) 운영진 방에서 /send_weekly_check 실행",
+            "4) 운영진 방에서 /sync_catalog_plans 로 4주 계획 반영",
+            "5) 운영진 방에서 /send_weekly_check 1 로 첫 진도체크 전송",
         ]
     )
 
@@ -390,12 +391,12 @@ async def cmd_guide(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "진도 체크",
             "- 북클럽 단체방에 올라오는 메시지에서 버튼(✅/🟡/🔴)을 눌러주세요.",
             "",
-            "이번 책 정보",
+            "이번 책 정보 (다음 모임 기준)",
             "- /book",
             "- /book_month 2026-04",
             "- /plan",
-            "- /my_progress",
-            "- 단체방 주간 진도체크 버튼으로 상태를 남겨주세요.",
+            "- /my_progress (1:1 대화에서만)",
+            "- 단체방 주간 진도체크 버튼으로 상태를 남겨주세요. (메시지에 책 제목이 같이 표시돼요)",
             "- 이전 주차 메시지가 남아 있으면, 같은 버튼을 다시 눌러 상태를 업데이트할 수 있어요.",
             "- 1:1 대화 바로가기: " + (dm_link or "봇 프로필에서 개인 대화를 열어주세요."),
             "",

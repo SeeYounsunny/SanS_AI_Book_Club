@@ -5,7 +5,7 @@
 ## What it does
 
 - 월별 책/모임 정보를 바탕으로 **4주 읽기 계획** 생성
-- 주차 시작일 오전 9시에 멤버 단체방으로 **주차 진도 체크** 메시지 자동 전송(간단 퀴즈 투표·토론 주제 포함)
+- 운영진이 필요할 때 멤버 단체방으로 **주차 진도 체크** 메시지 수동 전송
 - 멤버 1:1 채팅에서 책갈피(북마크) 저장/조회/수정/삭제
 - 운영진용: **월별(YYYY-MM) 책/모임 관리**, 주차 통계 등
 - 단체방에서 `@봇이름 질문` 형태로 현재 설정된 책/모임/계획을 묻는 Q&A
@@ -13,7 +13,7 @@
 ## 월별(이달의 책) 구조
 
 - 책/모임 정보는 파일 `data/book_catalog.json`(기본)에서 **월(YYYY-MM) → 책 정보** 형태로 관리합니다.
-- 멤버는 `/book`으로 **이번 달 책**, `/book_month 2026-04`로 **특정 월의 책**을 확인할 수 있어요.
+- 멤버는 `/book`으로 **다음 모임(가장 가까운 미래 meeting_at) 책**, `/book_month 2026-04`로 **특정 월의 책**을 확인할 수 있어요.
 - 파일 위치는 환경변수 `BOOK_CATALOG_PATH`로 바꿀 수 있습니다.
 
 ## Chat 구조 (중요)
@@ -34,8 +34,10 @@ chat id 확인은 운영진 전용 `/chatid`를 사용하세요.
   - `/book_search`, `/book_select` (참고용: 결과를 `data/book_catalog.json`에 옮겨 적기)
   - `/build_book_summary`, `/send_book_info`, `/show_book`
   - `/build_month_plan`, `/show_month_plan`
-  - `/send_weekly_check [주차]`, `/send_weekly_quiz [주차]`, `/send_weekly_topic [주차]`
+  - `/send_weekly_check [주차]` (수동 발송), `/send_weekly_quiz [주차]`, `/send_weekly_topic [주차]`
   - `/preview_weekly [주차]`, `/rebuild_weekly [주차]` (보내기 전 확인·해당 주만 재생성)
+  - `/sync_catalog_plans [force]` (카탈로그 기반 4주 계획 DB 반영)
+  - `/delete_last`, `/delete_reply` (잘못 보낸 메시지 삭제)
   - `/weekly_stats [주차]`, `/weekly_stats_detail [주차]`, `/share_weekly_stats [주차]`
 
 ## 운영 팁
