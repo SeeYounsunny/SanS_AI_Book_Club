@@ -10,8 +10,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 class WeeklyCheckConfig:
     month: str
     week_number: int
-    book_title: str = ""
     range_label: str
+    book_title: str = ""
     next_range_label: str = ""
     summary: str = ""
     encouragement: str = ""
