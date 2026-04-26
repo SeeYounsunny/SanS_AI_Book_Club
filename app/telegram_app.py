@@ -918,6 +918,46 @@ def _format_month_plan_brief(month: str, plans: List[MonthlyWeeklyPlan]) -> str:
     return "\n".join(lines)
 
 
+def _format_book_context_for_qa(info: dict) -> str:
+    """Fuller context for LLM Q&A than the member-facing /book message."""
+    lines = [
+        f"월: {info.get('month') or ''}",
+        f"제목: {info.get('title') or '(미설정)'}",
+        f"저자: {info.get('authors') or '(미상)'}",
+        f"페이지: {info.get('page_count') or '(미상)'}",
+        f"모임 일정: {info.get('meeting_at') or '(미설정)'}",
+    ]
+    for label, key in [
+        ("ISBN", "isbn"),
+        ("출간일", "published"),
+        ("출판사", "publisher"),
+        ("도서 링크", "info_link"),
+    ]:
+        value = (info.get(key) or "").strip()
+        if value:
+            lines.append(f"{label}: {value}")
+
+    links = _book_video_links(info)
+    if links:
+        lines.extend(["", "관련 영상 자료:"])
+        for i, link in enumerate(links, start=1):
+            lines.append(f"{i}. {link}")
+
+    summary = (info.get("summary") or "").strip()
+    if summary:
+        lines.extend(["", "요약:", summary])
+
+    description = (info.get("description") or "").strip()
+    if description:
+        lines.extend(["", "책 소개 원문:", _truncate(description, max_len=1800)])
+
+    toc = (info.get("toc") or "").strip()
+    if toc:
+        lines.extend(["", "목차:", _truncate(toc, max_len=1800)])
+
+    return "\n".join(lines).strip()
+
+
 def _build_mention_keyword_reply(text: str, info: dict, plans: List[MonthlyWeeklyPlan]) -> Optional[str]:
     q = (text or "").strip().lower()
     month = info.get("month") or ""
@@ -966,7 +1006,7 @@ def _get_openai_mention_answer(
     plans: List[MonthlyWeeklyPlan],
 ) -> str:
     plan_text = _format_month_plan_brief(month, plans)
-    info_text = _format_book_info_message(info, include_description=True)
+    info_text = _format_book_context_for_qa(info)
     client = OpenAI(api_key=api_key)
     resp = client.chat.completions.create(
         model=model,
@@ -974,8 +1014,11 @@ def _get_openai_mention_answer(
             {
                 "role": "system",
                 "content": (
-                    "너는 북클럽 운영 봇이다. 제공된 북클럽 설정 정보만 바탕으로 한국어로 답한다. "
-                    "모르는 내용은 지어내지 말고, 설정되지 않았다고 말한다. 답변은 친절하지만 간결하게 한다."
+                    "너는 북클럽 운영 봇이다. 한국어로 답한다. "
+                    "외부 웹을 실시간으로 검색할 수는 없지만, 사용자가 '검색해서 알려줘'라고 말해도 "
+                    "사과나 거절로 끝내지 말고 제공된 책 소개, 목차, 주차 계획, 링크 자료를 바탕으로 최대한 자세히 답한다. "
+                    "실제로 검색했다고 말하거나 제공되지 않은 사실을 지어내지 않는다. "
+                    "부족한 정보는 '저장된 자료 기준으로는'이라고 선을 긋고, 북클럽에서 읽기 좋은 관점과 질문을 함께 제안한다."
                 ),
             },
             {
