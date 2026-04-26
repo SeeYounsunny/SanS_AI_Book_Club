@@ -20,17 +20,26 @@ class WeeklyCheckConfig:
 
 
 def build_weekly_check_message(cfg: WeeklyCheckConfig) -> Tuple[str, InlineKeyboardMarkup]:
+    summary = (cfg.summary or "").strip()
+    if summary:
+        summary_lines = [
+            line
+            for line in summary.splitlines()
+            if not line.strip().startswith(("이번 주 범위:", "이번주 범위:"))
+        ]
+        summary = "\n".join(summary_lines).strip()
+
     parts = [
         f"{cfg.month} {cfg.week_number}주차 진도 체크",
         "",
         (f"📚 책: {cfg.book_title}" if (cfg.book_title or "").strip() else "").strip(),
-        f"📖 지난주 체크 범위: {cfg.range_label}",
+        f"📖 지난주 읽기 범위: {cfg.range_label}",
     ]
     parts = [p for p in parts if p]
     if cfg.next_range_label:
-        parts.extend(["", f"🗓 이번주 예고 범위: {cfg.next_range_label}"])
-    if cfg.summary:
-        parts.extend(["", "[이번주 흐름 - 요약]", cfg.summary])
+        parts.extend(["", f"🗓 다음주 읽기 범위: {cfg.next_range_label}"])
+    if summary:
+        parts.extend(["", "[지난주 흐름 - 요약]", summary])
     if cfg.encouragement:
         parts.extend(["", cfg.encouragement])
     if cfg.show_quiz_teaser:

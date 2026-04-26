@@ -346,6 +346,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /build_month_plan: 모임 날짜 기준 4주 계획 생성(주차별 미니 퀴즈·토론 포함)",
             "- /show_month_plan: 4주 계획(운영진은 퀴즈·토론 미리보기 포함)",
             "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
+            "- /test_book_videos: 운영진 방에서 현재 책 관련 영상 자료 미리보기",
+            "- /send_book_videos: 현재 책 관련 영상 자료를 멤버방에 전송",
             "- /show_book: (다음 모임 기준) 책/모임 일정 확인",
             "- /set_puzzle_cover: 사진 메시지에 답장해 퍼즐 대표 이미지 저장",
             "- /show_puzzle <읽은페이지>: 랜덤 퍼즐 미리보기 (운영진 테스트)",
@@ -868,6 +870,42 @@ def _format_book_info_message(info: dict, *, include_description: bool = True) -
         lines.extend(["", "✨ 책 소개 요약", summary])
     elif include_description and description:
         lines.extend(["", "📌 소개", _truncate(description, max_len=700)])
+    return "\n".join(lines)
+
+
+def _book_video_links(info: dict) -> list[str]:
+    trailer_link = info.get("trailer_link") or ""
+    trailer_links = info.get("trailer_links") or []
+
+    links: list[str] = []
+    if isinstance(trailer_links, list):
+        links.extend([str(x).strip() for x in trailer_links if str(x).strip()])
+    elif isinstance(trailer_links, str) and trailer_links.strip():
+        links.append(trailer_links.strip())
+    if trailer_link:
+        links.append(str(trailer_link).strip())
+    return list(dict.fromkeys([link for link in links if link]))
+
+
+def _format_book_videos_message(info: dict) -> Optional[str]:
+    links = _book_video_links(info)
+    if not links:
+        return None
+    month = info.get("month") or ""
+    title = info.get("title") or "(미설정)"
+    summary = (info.get("summary") or "").strip()
+
+    lines = [
+        "🎬 이번 책 관련 영상 자료",
+        "",
+        f"📚 책: {title}" + (f" ({month})" if month else ""),
+    ]
+    if summary:
+        lines.extend(["", "책 소개 요약", summary])
+    lines.extend(["", "함께 보면 좋은 영상"])
+    for i, link in enumerate(links, start=1):
+        lines.append(f"{i}. {link}")
+    lines.extend(["", "읽는 흐름을 잡는 데 참고해보세요."])
     return "\n".join(lines)
 
 
@@ -1846,6 +1884,47 @@ async def cmd_send_book_info(update: Update, context: ContextTypes.DEFAULT_TYPE)
     sent = await context.bot.send_message(chat_id=settings.member_chat_id, text=text)
     _remember_last_member_message(settings, message_id=sent.message_id)
     await msg.reply_text("멤버 단체방에 책 정보를 전송했어요.")
+
+
+async def cmd_test_book_videos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+    settings: Settings = context.application.bot_data["settings"]
+    info = _load_club_book_info(settings)
+    text = _format_book_videos_message(info)
+    if text is None:
+        await msg.reply_text("현재 대상 책에 등록된 영상 링크가 없어요. data/book_catalog.json의 trailer_link/trailer_links를 확인해줘요.")
+        return
+    await msg.reply_text(
+        "\n".join(
+            [
+                "🧪 운영진 테스트 미리보기",
+                "멤버방에는 발송되지 않았어요.",
+                "",
+                text,
+            ]
+        )
+    )
+
+
+async def cmd_send_book_videos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+    settings: Settings = context.application.bot_data["settings"]
+    info = _load_club_book_info(settings)
+    text = _format_book_videos_message(info)
+    if text is None:
+        await msg.reply_text("현재 대상 책에 등록된 영상 링크가 없어요. data/book_catalog.json의 trailer_link/trailer_links를 확인해줘요.")
+        return
+    sent = await context.bot.send_message(chat_id=settings.member_chat_id, text=text)
+    _remember_last_member_message(settings, message_id=sent.message_id)
+    await msg.reply_text("멤버 단체방에 이번 책 관련 영상 자료를 전송했어요.")
 
 
 def _parse_bookmark_args(arg_text: str) -> tuple[Optional[int], str]:
@@ -3181,22 +3260,21 @@ def _build_weekly_summary_from_book(entry: dict, *, start_page: int, end_page: i
     base = (entry.get("summary") or "").strip()
     if not base:
         base = (entry.get("description") or "").strip()
-    base = _truncate_plain(base, max_len=240)
-    range_line = f"이번 주 범위: p.{start_page}-{end_page}"
-    return "\n".join([range_line, base]).strip() if base else range_line
+    return _truncate_plain(base, max_len=240) if base else ""
 
 
-def _sync_month_plans_from_catalog(settings: Settings, *, force: bool = False) -> tuple[int, list[str]]:
+def _sync_month_plans_from_catalog(settings: Settings, *, force: bool = False) -> tuple[int, list[str], list[str]]:
     """
     Upsert 4-week plans for every month present in the catalog file.
     Uses only catalog data (page_count, meeting_at, summary/description).
     """
     catalog = load_book_catalog(settings.book_catalog_path)
     if not catalog:
-        return 0, [f"카탈로그가 비어있어요: {settings.book_catalog_path}"]
+        return 0, [f"카탈로그가 비어있어요: {settings.book_catalog_path}"], []
 
     updated = 0
     warnings: list[str] = []
+    details: list[str] = []
     for month, entry in catalog.items():
         if not isinstance(entry, dict):
             continue
@@ -3217,6 +3295,7 @@ def _sync_month_plans_from_catalog(settings: Settings, *, force: bool = False) -
             existing = _load_monthly_weekly_plans(settings, month=m)
             if len(existing) >= 4:
                 # Keep any existing (possibly LLM-generated) plans unless forced.
+                details.append(f"- {m}: 기존 4주 계획 유지 (safe mode)")
                 continue
 
         total_pages = int(page_count_raw)
@@ -3253,6 +3332,7 @@ def _sync_month_plans_from_catalog(settings: Settings, *, force: bool = False) -
                         discussion_topic="",
                     )
                     updated += 1
+                details.append(f"- {m}: 4주 계획 {'덮어쓰기' if force else '생성/보강'}")
             finally:
                 conn.close()
         else:
@@ -3272,10 +3352,11 @@ def _sync_month_plans_from_catalog(settings: Settings, *, force: bool = False) -
                         discussion_topic="",
                     )
                     updated += 1
+                details.append(f"- {m}: 4주 계획 {'덮어쓰기' if force else '생성/보강'}")
             finally:
                 conn.close()
 
-    return updated, warnings
+    return updated, warnings, details
 
 
 async def cmd_sync_catalog_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3286,16 +3367,30 @@ async def cmd_sync_catalog_plans(update: Update, context: ContextTypes.DEFAULT_T
     if msg is None:
         return
 
-    force = bool(context.args and (context.args[0] or "").strip().lower() in ("force", "--force", "-f"))
-    updated, warnings = _sync_month_plans_from_catalog(settings, force=force)
+    force_words = {"force", "--force", "-f", "강제", "덮어쓰기", "overwrite"}
+    force = bool(context.args and any((arg or "").strip().lower() in force_words for arg in context.args))
+    active_month = _get_active_month(settings)
+    active_info = _load_club_book_info(settings, month=active_month)
+    updated, warnings, details = _sync_month_plans_from_catalog(settings, force=force)
     lines = [
         "✅ 카탈로그 기반 4주 계획을 DB에 반영했어요.",
         f"- 카탈로그: `{settings.book_catalog_path}`",
+        f"- 현재 대상 책: {active_month} / {active_info.get('title') or '(미설정)'}",
         f"- upsert된 주차 플랜 수: {updated}",
         f"- mode: {'force' if force else 'safe'} (기존 4주 계획이 있으면 {'덮어씀' if force else '유지'})",
         "",
-        "이후 자동 발송(진도 체크)은 각 주차의 scheduled_date(YYYY-MM-DD)에 맞춰 동작합니다.",
+        "진도 체크는 자동 발송되지 않고, /send_weekly_check [주차]로 수동 발송됩니다.",
     ]
+    if details:
+        lines.extend(["", "처리 내역", *details])
+    if not force and updated == 0:
+        lines.extend(
+            [
+                "",
+                "기존 요약을 덮어쓰려면 아래처럼 실행해줘요.",
+                "/sync_catalog_plans force",
+            ]
+        )
     if warnings:
         lines.extend(["", "⚠️ 일부 월은 건너뛰었어요.", *warnings])
     await msg.reply_text("\n".join(lines))
@@ -3776,6 +3871,8 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("build_month_plan", cmd_build_month_plan))
     app.add_handler(CommandHandler("show_month_plan", cmd_show_month_plan))
     app.add_handler(CommandHandler("send_book_info", cmd_send_book_info))
+    app.add_handler(CommandHandler("test_book_videos", cmd_test_book_videos))
+    app.add_handler(CommandHandler("send_book_videos", cmd_send_book_videos))
     app.add_handler(CommandHandler("book", cmd_book))
     app.add_handler(CommandHandler("book_month", cmd_book_month))
     app.add_handler(CommandHandler("set_month", cmd_set_month))
