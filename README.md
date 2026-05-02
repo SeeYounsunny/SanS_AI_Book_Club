@@ -34,7 +34,7 @@ chat id 확인은 운영진 전용 `/chatid`를 사용하세요.
   - `/book_search`, `/book_select` (참고용: 결과를 `data/book_catalog.json`에 옮겨 적기)
   - `/build_book_summary`, `/send_book_info`, `/test_book_videos`, `/send_book_videos`, `/show_book`
   - `/build_month_plan`, `/show_month_plan`
-  - `/test_weekly_check [주차]` (운영진 방 미리보기, 멤버방 발송 없음)
+  - `/test_weekly_check [주차]` (**멤버 진도 카드와 동일한 요약 본문** 미리보기, 운영진 방만 · 발송 없음)
   - `/send_weekly_check [주차]` (수동 발송), `/send_weekly_quiz [주차]`, `/send_weekly_topic [주차]`
   - `/preview_weekly [주차]`, `/rebuild_weekly [주차]` (보내기 전 확인·해당 주만 재생성)
   - `/sync_catalog_plans [force]` (카탈로그 기반 4주 계획 DB 반영)

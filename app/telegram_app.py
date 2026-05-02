@@ -335,11 +335,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "운영진용 명령어",
             "",
             "- /chatid: 현재 채팅의 chat_id 확인 (Railway 변수 MEMBER_CHAT_ID/ADMIN_CHAT_ID 설정용)",
-            "- /test_weekly_check [주차]: 운영진 방에서 진도 체크 미리보기 (멤버방 발송/발송 처리 없음)",
+            "- /test_weekly_check [주차]: 운영진 방에만 표시 · 멤버방 진도 체크와 같은 본문(요약·범위·응원 포함, 버튼 제외)·발송 안 함",
             "- /send_weekly_check [주차]: (수동) 북클럽 단체방에 주간 진도 체크 메시지 전송 (기본 1주차)",
             "- /send_weekly_quiz [주차]: (운영진) 해당 주차 미니 퀴즈(투표) 전송",
             "- /send_weekly_topic [주차]: (운영진) 해당 주차 토론 주제 전송",
-            "- /preview_weekly [주차]: (운영진) 저장된 해당 주차 요약·퀴즈·토론 미리보기",
+            "- /preview_weekly [주차]: 저장 분량 세부 카드 · 요약 원문·퀴즈·토론 한 번에 검토 (/test_weekly_check 는 ‘멤버에게 가는 카드 형태’) ",
             "- /rebuild_weekly [주차]: (운영진) 해당 주만 OpenAI로 다시 생성·저장 후 미리보기",
             "- 책/모임 정보는 파일로 관리: data/book_catalog.json (또는 환경변수 BOOK_CATALOG_PATH)",
             "- /build_book_summary: (선택) 책 소개를 1~3줄로 요약 (OPENAI_API_KEY 필요)",
@@ -3165,9 +3165,9 @@ async def cmd_test_weekly_check(update: Update, context: ContextTypes.DEFAULT_TY
         chat_id=chat.id,
         text="\n".join(
             [
-                "🧪 운영진 테스트 미리보기",
-                "멤버방에는 발송되지 않았고, 발송 완료 처리도 하지 않았어요.",
-                "버튼은 테스트 중 실수로 진도 통계가 섞이지 않도록 표시하지 않습니다.",
+                "🧪 진도 체크 미리보기 (운영진 전용)",
+                "아래 블록은 멤버방 자동·수동 전송(`/send_weekly_check`) 때와 같은 본문입니다. 버튼만 표시하지 않았어요.",
+                "발송 및 ‘발송 완료(sent)’ 처리 없음.",
                 "",
                 text,
             ]
