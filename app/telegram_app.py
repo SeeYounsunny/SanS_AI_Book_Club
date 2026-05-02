@@ -1122,6 +1122,10 @@ def _weekly_quiz_json_from_llm_payload(data: dict) -> str:
     payload = {"question": q, "options": opts, "correct_index": ci, "explanation": expl}
     return json.dumps(payload, ensure_ascii=False)
 
+_WEEKLY_SUMMARY_LINE_SOFT_MIN = 8
+_WEEKLY_SUMMARY_LINE_TARGET = 10
+_WEEKLY_SUMMARY_LINE_CAP = 12
+
 
 def _get_openai_weekly_plan_bundle(
     api_key: str,
@@ -1144,8 +1148,9 @@ def _get_openai_weekly_plan_bundle(
                 "content": (
                     "너는 온라인 북클럽 운영진을 돕는 에디터다. 책 소개(원문)만 근거로 주차별 콘텐츠를 한국어 JSON으로 만든다. "
                     "원문에 없는 인물·사건·결말·구체 장면은 지어내지 않고, 추측·상상으로 사실 단정도 하지 않는다. "
-                    "summary_lines는 **해당 주차 페이지 구간 안에서 무엇에 주목하면 좋은지**(읽는 관점·기대·북클럽에서 나누기 좋은 포인트)를 쓰고, "
-                    "책 소개 통째로 재요약하듯 모든 주차에 비슷한 문장을 반복해서는 안 된다. 각 주차는 문장·구성·예시 각도가 명확히 달라야 한다. "
+                    "summary_lines는 **해당 주차 페이지 구간(p.시작–끝)**에 초점을 맞춘 **구체적이고 읽기에 도움이 되는 안내**여야 한다. "
+                    "책 소개 원문 안에서 명시된 주제·톤·구조·설정 맥락만 활용하고, 장면 단위 줄거리·등장 이름·결말을 지어내지 않는다. "
+                    "각 줄은 한 가지 명확한 역할을 갖도록 촘촘히 다듬되(예: 이 구간 독법, 북클럽에서 물을 질문, 소개문 근거의 주제 하나 짚기 등), 주차마다 접근 각도와 문구가 분명히 달라야 한다. "
                     "퀴즈는 아주 쉬운 객관식 1문항(보기 4개)으로, 이 주차 페이지를 아직 안 읽어도 부담 없는 수준으로 낸다. "
                     "토론 주제는 스포일러 없이 생각을 확장하는 질문 한 덩어리로 쓴다."
                 ),
@@ -1162,9 +1167,8 @@ def _get_openai_weekly_plan_bundle(
                     "반드시 아래 키만 갖는 JSON 한 개로만 응답한다(앞뒤 설명 문장 금지).\n"
                     "{\n"
                     '  "summary_lines": [\n'
-                    '    "(첫 줄) 이 주차 p.' + str(start_page) + "-" + str(end_page)
-                    + " 범위와 명확히 연결되는 읽기 초점 한 줄\",\n"
-                    '    "둘째 줄", "셋째 줄", "넷째 줄(선택)", "다섯째 줄(선택)"\n'
+                    f'    "실제 줄1: 반드시 p.{start_page}-{end_page} 이 구간 독서에 직결되는 첫 문장",\n'
+                    '    "실제 줄2~: 위와 겹치지 않는 다른 조언·질문·주제 각각 한 줄로", ...\n'
                     "  ],\n"
                     '  "encouragement": "응원 한 줄",\n'
                     '  "quiz": {\n'
@@ -1176,16 +1180,19 @@ def _get_openai_weekly_plan_bundle(
                     '  "discussion": "모임에서 나눌 토론 질문 또는 화두 1~2문장"\n'
                     "}\n"
                     "중요 규칙:\n"
-                    f"- summary_lines는 **반드시 p.{start_page}-{end_page} 구간 안에서 어떻게 읽어 보면 좋을지**(주의할 점, 북클럽 초점 관점 등) 중심. "
-                    "책 전체 줄거리·등장인물 소개처럼 ‘모든 주차에 그대로 써먹을 수 있는’ 같은 문단은 피한다.\n"
-                    "- 다른 주차와 대비해 새로운 초점 어구·예시 접근을 택한다. 1주차와 2주차가 같은 문장으로 시작하거나 같은 문단을 재탕하면 안 된다.\n"
-                    "제약: summary_lines는 3~5개 문자열. 보기는 정확히 4개, 서로 다르게. "
-                    "correct_index는 0~3 정수. 질문·보기 각각 과도하게 길지 않게."
+                    f"- summary_lines는 **{_WEEKLY_SUMMARY_LINE_SOFT_MIN}개 이상, 최대 {_WEEKLY_SUMMARY_LINE_CAP}개** 문자열(한 줄 하나). 목표 분량은 **약 {_WEEKLY_SUMMARY_LINE_TARGET}줄**. "
+                    "짧은 뻔한 헤더 문장 반복 금지, 추상어만 늘어놓은 문장 피하기. 책 소개에 없는 디테일·인용·등장 이름을 만들어내면 안 된다.\n"
+                    f"- 각 줄 정보 밀도를 높이라. 이 구간 진도 안에서 무엇을 유의해서 읽을지, 책 소개에 근거한 주제 하나, 북클럽 대화 거리, 페이지 넘김 속도 조절·메모 포인트 등을 섞어도 좋다(단, 허위 사실 금지).\n"
+                    f"- summary_lines는 **반드시 p.{start_page}-{end_page} 구간**(전체 페이지 수 대비 이 묶음 진도 의미 포함) 안에서 무엇을 어떻게 읽을지 구체적으로. "
+                    "책 전체를 한 줄로 압축한 문단처럼 들리면 안 된다.\n"
+                    "- 다른 주차와 초점 어구·독법·질문 유형이 겹치면 안 된다. 같은 문단을 다른 주차에 재사용하면 안 된다.\n"
+                    "보기는 정확히 4개, 서로 다르게. "
+                    f"correct_index는 0~3 정수. quiz·discussion은 기존대로 과도하게 길지 않게."
                 ),
             },
         ],
         temperature=0.72,
-        max_tokens=1100,
+        max_tokens=2600,
         response_format={"type": "json_object"},
     )
     raw = (resp.choices[0].message.content or "").strip()
@@ -1196,13 +1203,13 @@ def _get_openai_weekly_plan_bundle(
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()][:5]
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()][:_WEEKLY_SUMMARY_LINE_CAP]
         summary = "\n".join(lines) if lines else f"p.{start_page}-{end_page} 분량을 여유 있게 읽어 가면 돼요."
         return summary, encouragement, quiz_json, discussion
 
     lines_in = data.get("summary_lines")
     if isinstance(lines_in, list):
-        parts = [str(x).strip() for x in lines_in if str(x).strip()][:5]
+        parts = [str(x).strip() for x in lines_in if str(x).strip()][:_WEEKLY_SUMMARY_LINE_CAP]
         summary = "\n".join(parts)
     if not summary.strip():
         summary = (data.get("summary") or "").strip() or f"p.{start_page}-{end_page} 분량을 여유 있게 읽어 가면 돼요."
@@ -1211,7 +1218,7 @@ def _get_openai_weekly_plan_bundle(
         encouragement = enc[:300]
     discussion = (data.get("discussion") or "").strip()[:800]
     quiz_json = _weekly_quiz_json_from_llm_payload(data)
-    capped = [ln.strip() for ln in summary.splitlines() if ln.strip()][:5]
+    capped = [ln.strip() for ln in summary.splitlines() if ln.strip()][:_WEEKLY_SUMMARY_LINE_CAP]
     return "\n".join(capped), encouragement, quiz_json, discussion
 
 
