@@ -343,7 +343,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "- /rebuild_weekly [주차]: (운영진) 해당 주만 OpenAI로 다시 생성·저장 후 미리보기",
             "- 책/모임 정보는 파일로 관리: data/book_catalog.json (또는 환경변수 BOOK_CATALOG_PATH)",
             "- /build_book_summary: (선택) 책 소개를 1~3줄로 요약 (OPENAI_API_KEY 필요)",
-            "- /build_month_plan: 모임 날짜 기준 4주 계획 생성(주차별 미니 퀴즈·토론 포함)",
+            "- /build_month_plan: 모임 기준 4주 계획 생성 후, 운영진에게 주차별 요약·응원 미리보기까지 출력",
             "- /show_month_plan: 4주 계획(운영진은 퀴즈·토론 미리보기 포함)",
             "- /send_book_info: 확정된 책 요약을 멤버 단체방에 전송",
             "- /test_book_videos: 운영진 방에서 현재 책 관련 영상 자료 미리보기",
@@ -1331,6 +1331,33 @@ def _chunk_text_for_telegram(text: str, limit: int = 3900) -> List[str]:
     return chunks
 
 
+def _format_admin_four_week_summaries(month: str, plans: List[MonthlyWeeklyPlan]) -> str:
+    """After /build_month_plan: show admins each week's stored summary + encouragement."""
+    sorted_plans = sorted(plans, key=lambda p: p.week_number)
+    lines = [
+        f"📌 {month} 저장본 — 주차별 요약·응원 미리보기 (운영진)",
+        "(퀴즈·토론은 /preview_weekly [주차], 멤버 진도 카드 문구는 /test_weekly_check [주차])",
+        "",
+    ]
+    if len(sorted_plans) < 4:
+        lines.extend([f"(참고) DB에 주차 레코드가 {len(sorted_plans)}개뿐이에요.", ""])
+    for plan in sorted_plans:
+        summary = plan.summary.strip() or "(요약 없음)"
+        encouragement = plan.encouragement.strip() or "(없음)"
+        lines.extend(
+            [
+                "━━━━━━━━━━━━━━━━",
+                f"{plan.week_number}주차 · {plan.scheduled_date} · p.{plan.start_page}-{plan.end_page}",
+                "",
+                summary,
+                "",
+                f"응원: {encouragement}",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
 def _format_weekly_engagement_preview(plan: MonthlyWeeklyPlan) -> str:
     lines = [
         f"📋 {plan.month} {plan.week_number}주차 콘텐츠 (저장본 미리보기)",
@@ -1745,10 +1772,17 @@ async def cmd_build_month_plan(update: Update, context: ContextTypes.DEFAULT_TYP
 
     _set_month_setting(settings, month=month, key="month_plan_generated_at_iso", value=_now_iso())
 
-    preview_lines = [f"{month} 4주 계획을 저장했어요.", "- 각 주차에 미니 퀴즈(투표)·토론 주제가 함께 들어가요."]
+    saved = _load_monthly_weekly_plans(settings, month=month)
+
+    overview = [
+        f"✅ {month} 4주 계획을 저장했어요.",
+        "- 각 주차에 미니 퀴즈(투표)·토론 주제가 포함돼 있어요.",
+    ]
     for idx, (start_page, end_page) in enumerate(page_ranges, start=1):
-        preview_lines.append(f"- {idx}주차: p.{start_page}-{end_page} / 시작 {schedule_dates[idx - 1]}")
-    await msg.reply_text("\n".join(preview_lines))
+        overview.append(f"- {idx}주차: p.{start_page}-{end_page} / 시작 {schedule_dates[idx - 1]}")
+    blob = "\n".join(overview) + "\n\n" + _format_admin_four_week_summaries(month, saved)
+    for chunk in _chunk_text_for_telegram(blob):
+        await msg.reply_text(chunk)
 
 
 async def cmd_show_month_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
